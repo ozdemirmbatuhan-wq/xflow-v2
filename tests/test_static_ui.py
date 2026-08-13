@@ -69,6 +69,17 @@ class StaticUiContractTests(unittest.TestCase):
         self.assertIn("result.winglet_comparison", javascript)
         self.assertIn("Winglet optimum", javascript)
 
+    def test_root_moment_constraint_is_removed_and_step_outputs_are_wired(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertNotIn('id="maxBending"', html)
+        self.assertNotIn("max_root_bending_moment_nm", javascript)
+        self.assertIn("selection_comparison", javascript)
+        self.assertIn("Fizibilite önceliği olmasaydı", javascript)
+        self.assertIn("wing_step_base64", javascript)
+        self.assertIn("3B CAD · STEP", javascript)
+        self.assertIn("Skaler alternatif · STEP", javascript)
+
     def test_cavitation_map_controls_and_extended_timeout_are_wired(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
         javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")

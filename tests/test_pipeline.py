@@ -13,6 +13,7 @@ from aeropt.pipeline import (
     _merge_defaults,
     run_design,
 )
+from aeropt.exporters import flow5_bundle_bytes
 
 
 class PipelineTests(unittest.TestCase):
@@ -54,6 +55,30 @@ class PipelineTests(unittest.TestCase):
             self.assertIn("aeropt-wing.xml", archive.namelist())
             self.assertIn("aeropt-wing.obj", archive.namelist())
 
+    def test_bundle_can_carry_distinct_scalar_only_cad_outputs(self):
+        bundle = flow5_bundle_bytes(
+            foil_dat_text="foil\n",
+            plane_xml_text="<plane/>",
+            wing_obj_text="o primary\n",
+            results_csv_text="primary\n",
+            project_json_text="{}",
+            polar_csv_text=None,
+            wing_step_bytes=b"PRIMARY STEP",
+            scalar_only_wing_obj_text="o scalar\n",
+            scalar_only_wing_step_bytes=b"SCALAR STEP",
+            scalar_only_results_csv_text="scalar\n",
+            scalar_only_flow5_project_bytes=b"SCALAR FL5",
+            scalar_only_same_as_primary=False,
+        )
+        with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
+            self.assertEqual(archive.read("aeropt-wing.step"), b"PRIMARY STEP")
+            self.assertEqual(
+                archive.read("aeropt-scalar-only-wing.step"), b"SCALAR STEP"
+            )
+            self.assertEqual(
+                archive.read("aeropt-scalar-only-optimized.fl5"), b"SCALAR FL5"
+            )
+
     def test_rejects_supersonic_or_transonic_request(self):
         with self.assertRaises(InputError):
             run_design(
@@ -87,6 +112,7 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(DEFAULT_REQUEST["solver"]["flow5_checkpoint_enabled"])
         self.assertEqual(DEFAULT_REQUEST["solver"]["flow5_wing_optimizer"], "nsga2")
         self.assertFalse(DEFAULT_REQUEST["wing"]["winglet_optimization_enabled"])
+        self.assertNotIn("max_root_bending_moment_nm", DEFAULT_REQUEST["wing"])
         self.assertEqual(DEFAULT_REQUEST["solver"]["flow5_winglet_candidate_budget"], 48)
         self.assertTrue(DEFAULT_REQUEST["solver"]["flow5_budget_escalation_enabled"])
         self.assertEqual(DEFAULT_REQUEST["solver"]["flow5_budget_maximum_multiplier"], 4.0)
@@ -98,6 +124,11 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(DEFAULT_REQUEST["validation"]["enabled"])
         self.assertFalse(DEFAULT_REQUEST["structure"]["enabled"])
         self.assertEqual(DEFAULT_REQUEST["hydro"]["constraint_mode"], "hard")
+
+        migrated = _merge_defaults(
+            {"wing": {"max_root_bending_moment_nm": 123.0}}
+        )
+        self.assertNotIn("max_root_bending_moment_nm", migrated["wing"])
 
     def test_flow5_candidate_timeout_accepts_six_hours_and_rejects_more(self):
         with (

@@ -106,6 +106,11 @@ class Flow5NativePipelineTests(unittest.TestCase):
             base64.b64decode(exports["flow5_project_base64"]),
             b"FLOW5_TEST_DOUBLE_PROJECT\x00",
         )
+        step = base64.b64decode(exports["wing_step_base64"])
+        self.assertTrue(step.startswith(b"ISO-10303-21;"))
+        self.assertIn(b"END-ISO-10303-21;", step)
+        self.assertIn(b"SI_UNIT($,.METRE.)", step.replace(b" ", b""))
+        self.assertIn(b"5 sections x 160 points", step)
         bundle = base64.b64decode(exports["flow5_bundle_base64"])
         with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
             self.assertIn("aeropt-optimized.fl5", archive.namelist())
@@ -113,11 +118,40 @@ class Flow5NativePipelineTests(unittest.TestCase):
             self.assertIn("aeropt-validation.json", archive.namelist())
             self.assertIn("aeropt-pareto.json", archive.namelist())
             self.assertIn("aeropt-diagnostics.json", archive.namelist())
+            self.assertIn("aeropt-wing.step", archive.namelist())
             self.assertNotIn("aeropt-cavitation.json", archive.namelist())
             self.assertEqual(
                 archive.read("aeropt-optimized.fl5"), b"FLOW5_TEST_DOUBLE_PROJECT\x00"
             )
+            self.assertEqual(archive.read("aeropt-wing.step"), step)
         self.assertNotIn("cavitation_json", exports)
+
+    def test_feasibility_first_and_scalar_only_selections_are_both_reported(self):
+        comparison = self.result["wing_optimization"]["selection_comparison"]
+        self.assertIn("feasibility_first", comparison)
+        self.assertIn("scalar_only", comparison)
+        self.assertEqual(
+            comparison["feasibility_first"]["wing"]["geometry"],
+            self.result["wing"]["geometry"],
+        )
+        self.assertIn(
+            comparison["scalar_only"]["same_as_feasibility_first"],
+            {True, False},
+        )
+        self.assertEqual(
+            self.result["wing_optimization"]["finalists_requested"], 1
+        )
+        objective_keys = {
+            item["key"]
+            for item in self.result["wing_optimization"]["multi_objective"][
+                "objective_specs"
+            ]
+        }
+        self.assertNotIn("max_root_bending_moment_nm", objective_keys)
+        scalar_exports = self.result["exports"]["scalar_only_alternative"]
+        if not comparison["scalar_only"]["same_as_feasibility_first"]:
+            self.assertTrue(scalar_exports["wing_step_base64"])
+            self.assertTrue(scalar_exports["wing_obj"])
 
     def test_sixteen_core_budget_avoids_outer_inner_oversubscription(self):
         foil_meta = self.result["airfoil_optimization"]
@@ -218,6 +252,10 @@ class Flow5NativePipelineTests(unittest.TestCase):
         self.assertNotIn("wingOpp.m_dCp.size()", source)
         self.assertIn("panel.index() * 3", source)
         self.assertIn('"panel_telemetry"', source)
+        self.assertIn("gmsh::model::occ::addThruSections", source)
+        self.assertIn("OpenCascade STEP loft did not produce a closed solid", source)
+        self.assertIn("normalizeStepMetreUnit", source)
+        self.assertIn('"wing_step"', source)
 
     def test_foil_only_result_can_feed_a_fixed_foil_wing_optimization(self):
         common = {

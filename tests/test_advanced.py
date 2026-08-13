@@ -12,13 +12,17 @@ from aeropt.baselines import build_baseline_profile
 from aeropt.checkpoint import OptimizerCheckpointStore, optimizer_fingerprint
 from aeropt.convergence import BudgetEscalationController, BudgetEscalationSettings
 from aeropt.diagnostics import diagnose_runtime_failure
-from aeropt.exporters import flow5_plane_xml, wing_obj
+from aeropt.exporters import flow5_plane_xml, wing_obj, wing_step_sections
 from aeropt.flow5 import Flow5Mesh, Flow5Runner
 from aeropt.flow5_optimization import (
     WingCandidate,
     build_pareto_analysis,
     fast_non_dominated_sort,
     nsga2_environmental_selection,
+    select_wing_finalist_indices,
+    wing_candidate_objectives,
+    wing_constraint_violation,
+    wing_objective_specs,
 )
 from aeropt.hydro import HydroSettings, analyze_hydro
 from aeropt.models import FLUID_PRESETS, WingGeometry
@@ -120,6 +124,22 @@ class AdvancedAnalysisTests(unittest.TestCase):
             float(line.split()[3]) for line in obj.splitlines() if line.startswith("v ")
         ]
         self.assertGreater(max(z_coordinates), 0.30)
+
+        planar_sections = wing_step_sections(foil, self.geometry)
+        winglet_sections = wing_step_sections(foil, geometry)
+        self.assertEqual(len(planar_sections), 5)
+        self.assertEqual(len(winglet_sections), 7)
+        self.assertEqual({len(section) for section in planar_sections}, {160})
+        self.assertEqual({len(section) for section in winglet_sections}, {160})
+        self.assertAlmostEqual(
+            min(point[1] for section in planar_sections for point in section),
+            -max(point[1] for section in planar_sections for point in section),
+            places=8,
+        )
+        self.assertGreater(
+            max(point[2] for section in winglet_sections for point in section),
+            0.30,
+        )
 
     def test_structure_is_a_true_off_switch_and_runs_when_enabled(self):
         conditions = sample_conditions(self.geometry)
@@ -334,10 +354,10 @@ class AdvancedAnalysisTests(unittest.TestCase):
             ]
             return WingCandidate(self.geometry, score=drag / 40.0, response={"ok": True}, conditions=conditions)
 
-        low_drag = candidate(1.0, 14.0, 0.72)
-        low_bending = candidate(1.4, 8.0, 0.70)
+        low_drag = candidate(1.0, 1400.0, 0.78)
+        low_stall = candidate(1.4, 8.0, 0.70)
         dominated = candidate(1.8, 18.0, 0.88)
-        report = build_pareto_analysis([low_drag, low_bending, dominated], low_drag)
+        report = build_pareto_analysis([low_drag, low_stall, dominated], low_drag)
         search_rows = {item["id"]: item for item in report["candidates"]}
         self.assertTrue(search_rows["search-1"]["on_pareto_front"])
         self.assertTrue(search_rows["search-2"]["on_pareto_front"])
@@ -370,7 +390,7 @@ class AdvancedAnalysisTests(unittest.TestCase):
             candidate(1.8, 18.0, 0.88),
             candidate(1.2, 11.0, 0.74),
         ]
-        keys = ["mean_drag_n", "max_root_bending_moment_nm", "worst_stall_ratio"]
+        keys = ["mean_drag_n", "worst_stall_ratio"]
         fronts = fast_non_dominated_sort(candidates, keys)
         self.assertIn(0, fronts[0])
         self.assertIn(1, fronts[0])
@@ -378,6 +398,71 @@ class AdvancedAnalysisTests(unittest.TestCase):
         selected = nsga2_environmental_selection(candidates, 2, keys)
         self.assertEqual(len(selected), 2)
         self.assertTrue(all(item in candidates for item in selected))
+
+    def test_root_moment_is_telemetry_only_and_never_changes_selection(self):
+        def candidate(score: float, stall: float, moment: float) -> WingCandidate:
+            return WingCandidate(
+                self.geometry,
+                score=score,
+                response={"ok": True},
+                conditions=[
+                    {
+                        "drag_n": 1.25,
+                        "ld": 32.0,
+                        "stall_ratio": stall,
+                        "point": {
+                            "root_bending_moment_nm": moment,
+                            "out_of_mesh": False,
+                            "viscous_converged": True,
+                        },
+                    }
+                ],
+            )
+
+        low_moment = candidate(0.30, 0.80, 1.0)
+        extreme_moment = candidate(0.30, 0.80, 1.0e12)
+        keys = [item["key"] for item in wing_objective_specs()]
+        self.assertNotIn("max_root_bending_moment_nm", keys)
+        np.testing.assert_allclose(
+            wing_candidate_objectives(low_moment, keys),
+            wing_candidate_objectives(extreme_moment, keys),
+        )
+        self.assertEqual(
+            wing_constraint_violation(low_moment),
+            wing_constraint_violation(extreme_moment),
+        )
+
+    def test_scalar_only_winner_is_added_without_consuming_finalist_quota(self):
+        def candidate(score: float, stall: float) -> WingCandidate:
+            return WingCandidate(
+                self.geometry,
+                score=score,
+                response={"ok": True},
+                conditions=[
+                    {
+                        "drag_n": 1.0 + score,
+                        "ld": 30.0,
+                        "stall_ratio": stall,
+                        "point": {
+                            "root_bending_moment_nm": 1.0e9 * score,
+                            "out_of_mesh": False,
+                            "viscous_converged": True,
+                        },
+                    }
+                ],
+            )
+
+        candidates = [candidate(0.40, 0.80), candidate(0.10, 1.20)]
+        indices, report = select_wing_finalist_indices(
+            candidates,
+            1,
+            ["mean_drag_n", "worst_stall_ratio"],
+            optimizer="nsga2",
+        )
+        self.assertEqual(indices, [0, 1])
+        self.assertEqual(report["requested_finalists"], 1)
+        self.assertEqual(report["evaluated_finalists"], 2)
+        self.assertTrue(report["scalar_only_diagnostic_added"])
 
     def test_budget_controller_escalates_then_stops_when_objectives_stabilize(self):
         controller = BudgetEscalationController(

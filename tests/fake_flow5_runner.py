@@ -48,6 +48,44 @@ def assert_coordinate_count(request: dict, path: Path) -> None:
         raise ValueError(f"expected {expected} foil coordinates, found {len(rows)}")
 
 
+def write_step_test_double(request: dict, path: Path) -> None:
+    sections = request.get("step_sections")
+    if not isinstance(sections, list):
+        raise ValueError("save_step requires step_sections")
+    expected_sections = 7 if request.get("winglet_active") else 5
+    if len(sections) != expected_sections:
+        raise ValueError(
+            f"expected {expected_sections} STEP sections, found {len(sections)}"
+        )
+    point_count = len(sections[0]) if sections else 0
+    if point_count < 40 or any(len(section) != point_count for section in sections):
+        raise ValueError("STEP sections must have at least 40 matched contour points")
+    samples: list[tuple[float, float, float]] = []
+    for section in sections:
+        for point in section:
+            if not isinstance(point, list) or len(point) != 3:
+                raise ValueError("STEP contour point must contain x, y and z")
+            coordinates = tuple(float(value) for value in point)
+            if not all(math.isfinite(value) for value in coordinates):
+                raise ValueError("STEP contour contains a non-finite coordinate")
+        samples.append(tuple(float(value) for value in section[0]))
+    rows = [
+        "ISO-10303-21;",
+        "HEADER;",
+        "FILE_DESCRIPTION(('AeroOpt deterministic STEP test double'),'2;1');",
+        "FILE_NAME('aeropt-wing.step','','',('AeroOpt'),('AeroOpt'),'','','');",
+        "FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));",
+        "ENDSEC;",
+        "DATA;",
+        f"/* TEST DOUBLE ONLY: {len(sections)} sections x {point_count} points; SI metre coordinates */",
+    ]
+    for index, (x, y, z) in enumerate(samples, start=1):
+        rows.append(f"#{index}=CARTESIAN_POINT('',({x:.12g},{y:.12g},{z:.12g}));")
+    rows.append("#1000=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT($,.METRE.));")
+    rows.extend(("ENDSEC;", "END-ISO-10303-21;", ""))
+    path.write_text("\n".join(rows), encoding="ascii")
+
+
 def run_foil(request: dict) -> dict:
     foil_path = Path(request["paths"]["foil.dat"])
     assert_coordinate_count(request, foil_path)
@@ -432,6 +470,10 @@ def run_wing(request: dict) -> dict:
         project = Path(request["output_dir"]) / "aeropt-optimized.fl5"
         project.write_bytes(b"FLOW5_TEST_DOUBLE_PROJECT\x00")
         artifacts["project_fl5"] = str(project)
+    if request.get("save_step"):
+        step = Path(request["output_dir"]) / "aeropt-wing.step"
+        write_step_test_double(request, step)
+        artifacts["wing_step"] = str(step)
     return {
         "cases": cases,
         "artifacts": artifacts,
