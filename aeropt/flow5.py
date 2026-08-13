@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .exporters import airfoil_dat, flow5_plane_xml
+from .exporters import airfoil_dat, flow5_plane_xml, wing_step_sections
 from .models import AirfoilLike, Fluid, WingGeometry
 
 
@@ -638,6 +638,7 @@ class Flow5Runner:
                 "max_threads": int(max_threads),
                 "foil_coordinate_points": int(coordinate_points),
                 "save_project": bool(save_project),
+                "save_step": bool(save_project),
                 "panel_telemetry": bool(panel_telemetry),
                 "winglet_active": bool(geometry.winglet_active),
                 "thin_surfaces": bool(thin_surfaces),
@@ -652,6 +653,17 @@ class Flow5Runner:
                 ),
                 "mesh": mesh.to_dict(),
                 **({"section_foils": section_request} if section_request else {}),
+                **(
+                    {
+                        "step_sections": wing_step_sections(
+                            foil,
+                            geometry,
+                            section_foils=section_foils,
+                        )
+                    }
+                    if save_project
+                    else {}
+                ),
             },
             {
                 **wing_files,

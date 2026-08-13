@@ -76,7 +76,6 @@ DEFAULT_REQUEST: dict[str, Any] = {
         "tip_twist_max_deg": 0.0,
         "alpha_min_deg": -2.0,
         "alpha_max_deg": 12.0,
-        "max_root_bending_moment_nm": 0.0,
         "multi_section_geometry_enabled": True,
         "mid_chord_factor_min": 0.85,
         "mid_chord_factor_max": 1.15,
@@ -229,6 +228,10 @@ def _merge_defaults(payload: dict[str, Any]) -> dict[str, Any]:
             merged[section].update(values)
         else:
             merged[section] = values
+    # Deprecated project files can still contain this field.  Root bending
+    # moment is telemetry only and must never re-enter design selection.
+    if isinstance(merged.get("wing"), dict):
+        merged["wing"].pop("max_root_bending_moment_nm", None)
     # A direct JSON caller may select a preset without echoing the three
     # editable property fields that the browser always submits.  Do not leave
     # the air defaults attached to a water preset in that case; explicit
@@ -344,7 +347,7 @@ def _insights(result: dict[str, Any], fluid_key: str, bounds: dict[str, tuple[fl
             {
                 "level": "bad",
                 "title": "Kısıtlar altında tam fizibil değil",
-                "text": "Hedef taşıma, stall marjı, hücum açısı veya kök moment sınırlarından en az biri sağlanamadı. Boyut sınırlarını genişletin ya da hızı artırın.",
+                "text": "Hedef taşıma, stall marjı veya hücum açısı koşullarından en az biri sağlanamadı. Boyut sınırlarını genişletin ya da hızı artırın.",
             }
         )
     return messages
@@ -423,8 +426,6 @@ def run_design(
     alpha_bounds = _bounds(
         wing_cfg, "alpha_min_deg", "alpha_max_deg", minimum=-15.0, maximum=25.0
     )
-    max_bending_raw = _number(wing_cfg, "max_root_bending_moment_nm", minimum=0.0)
-    max_bending = max_bending_raw or None
     structural_settings = StructuralSettings(
         enabled=_boolean(structure_cfg, "enabled"),
         youngs_modulus_pa=1.0e9
@@ -991,7 +992,6 @@ def run_design(
             "sweep_bounds": sweep_bounds,
             "twist_bounds": twist_bounds,
             "alpha_bounds": alpha_bounds,
-            "max_root_bending_moment_nm": max_bending,
             "cancel_event": cancel_event,
         }
         if workflow_mode == "foil_only":
@@ -1229,7 +1229,6 @@ def run_design(
         sweep_bounds=sweep_bounds,
         twist_bounds=twist_bounds,
         alpha_bounds=alpha_bounds,
-        max_root_bending_moment=max_bending,
         effort=effort,
         seed=seed,
         modes=modes,

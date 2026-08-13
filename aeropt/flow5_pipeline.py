@@ -4,6 +4,7 @@ import base64
 from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
+import math
 import threading
 from typing import Any, Callable
 
@@ -259,7 +260,7 @@ def _native_insights(
                     "text": (
                         "Aynı izdüşüm açıklığı ve taşıma hedefinde flow5 karşılaştırması "
                         f"winglet için toplam sürükleme değişimini %{drag_delta:+.2f} buldu. "
-                        "Profil sürüklemesi ve kök momenti seçim amacına birlikte girdi."
+                        "Kök momenti seçim amacına veya fizibilite kararına girmez."
                     ),
                 }
             )
@@ -425,7 +426,7 @@ def _native_insights(
             {
                 "level": "warn",
                 "title": "Açıklık üst sınıra dayandı",
-                "text": "Aerodinamik amaç daha uzun açıklık istiyor olabilir. Yapısal kütle ve rijitlik ayrıca modellenmediği için kök moment sınırı kullanın.",
+                "text": "Aerodinamik amaç daha uzun açıklık istiyor olabilir. Nihai yapı, yükler raporlanarak ayrıca doğrulanmalıdır.",
             }
         )
     worst = max(conditions, key=lambda item: item.get("stall_ratio", 0.0), default=None)
@@ -458,7 +459,7 @@ def _native_insights(
             {
                 "level": "bad",
                 "title": "Bütün akış noktaları fizibil değil",
-                "text": "En az bir hızda stall, viskoz polar ağı veya kök moment koşulu ihlal edildi. Hız/boyut aralığını değiştirin.",
+                "text": "En az bir hızda stall, viskoz polar ağı ya da etkin yapı/hidrofoil koşulu ihlal edildi. Hız/boyut aralığını değiştirin.",
             }
         )
     for label, budget_report in (
@@ -512,7 +513,6 @@ def run_flow5_native_design(
     sweep_bounds: tuple[float, float],
     twist_bounds: tuple[float, float],
     alpha_bounds: tuple[float, float],
-    max_root_bending_moment_nm: float | None,
     settings: Flow5NativeSettings,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     cancel_event: threading.Event | None = None,
@@ -614,7 +614,7 @@ def run_flow5_native_design(
         checkpoint_runner_identity = {"path": str(runner.path)}
 
     checkpoint_contract = {
-        "contract": 4,
+        "contract": 5,
         "flow5_api_version": "7.57",
         "seed": settings.seed,
         "fluid": fluid.to_dict(),
@@ -643,7 +643,6 @@ def run_flow5_native_design(
             "winglet_cant": settings.winglet_cant_bounds,
             "winglet_toe": settings.winglet_toe_bounds,
             "winglet_taper": settings.winglet_taper_bounds,
-            "max_root_bending_moment_nm": max_root_bending_moment_nm,
         },
         "search": {
             "runner": checkpoint_runner_identity,
@@ -668,7 +667,7 @@ def run_flow5_native_design(
 
     def checkpoint_key(label: str, payload: dict[str, Any]) -> str:
         return optimizer_fingerprint(
-            f"flow5-native-v4:{label}",
+            f"flow5-native-v5:{label}",
             {
                 "problem": checkpoint_contract,
                 "payload": payload,
@@ -736,6 +735,64 @@ def run_flow5_native_design(
             "mesh_convergence": wing_metadata.get("mesh_convergence", {}),
         }
 
+    def same_wing_geometry(
+        left_result: dict[str, Any], right_result: dict[str, Any]
+    ) -> bool:
+        left = left_result.get("geometry", {})
+        right = right_result.get("geometry", {})
+        numeric_keys = (
+            "span",
+            "root_chord",
+            "taper",
+            "sweep_deg",
+            "tip_twist_deg",
+            "mid_chord_factor",
+            "effective_mid_twist_deg",
+            "winglet_height",
+            "winglet_cant_deg",
+            "winglet_toe_deg",
+            "winglet_taper",
+        )
+        if bool(left.get("winglet_active")) != bool(right.get("winglet_active")):
+            return False
+        return all(
+            math.isclose(
+                float(left.get(key, 0.0)),
+                float(right.get(key, 0.0)),
+                rel_tol=0.0,
+                abs_tol=1.0e-10,
+            )
+            for key in numeric_keys
+        )
+
+    def scalar_stage_choice(
+        stage: str,
+        wing_result: dict[str, Any],
+        wing_metadata: dict[str, Any],
+        wing_response: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        comparison = wing_metadata.get("selection_comparison", {})
+        scalar = deepcopy(comparison.get("scalar_only", {}))
+        if not scalar:
+            scalar = {
+                "policy": "fizibilite önceliği yok; yalnız en düşük skaler toplam amaç",
+                "available": True,
+                "deliverable": True,
+                "same_as_feasibility_first": True,
+                "feasible": bool(wing_metadata.get("feasible", False)),
+                "constraint_violation": 0.0,
+                "objective": float(wing_metadata["objective"]),
+                "mesh_convergence": wing_metadata.get("mesh_convergence"),
+                "wing": wing_result,
+                "coarse_wing": None,
+                "error": None,
+            }
+        scalar["stage"] = stage
+        if scalar.get("same_as_feasibility_first"):
+            return scalar, wing_response
+        response = wing_response.get("_scalar_only_alternative_response")
+        return scalar, response if isinstance(response, dict) else None
+
     def optimize_wing_pair(
         *,
         foil: CSTAirfoilDesign,
@@ -764,7 +821,6 @@ def run_flow5_native_design(
             "sweep_bounds": sweep_bounds,
             "twist_bounds": twist_bounds,
             "alpha_bounds": alpha_bounds,
-            "max_root_bending_moment_nm": max_root_bending_moment_nm,
             "finalists": settings.finalists,
             "total_threads": settings.threads,
             "coordinate_points": settings.foil_coordinate_points,
@@ -996,8 +1052,45 @@ def run_flow5_native_design(
             selected = (winglet_wing, winglet_baseline, winglet_meta, winglet_response)
         else:
             selected = (planar_wing, planar_baseline, planar_meta, planar_response)
-        selected[2]["winglet_comparison"] = comparison
-        return selected
+        selected_wing, selected_baseline, selected_meta, selected_response = selected
+        planar_scalar, planar_scalar_response = scalar_stage_choice(
+            "planar", planar_wing, planar_meta, planar_response
+        )
+        winglet_scalar, winglet_scalar_response = scalar_stage_choice(
+            "winglet", winglet_wing, winglet_meta, winglet_response
+        )
+        if float(winglet_scalar.get("objective", math.inf)) < float(
+            planar_scalar.get("objective", math.inf)
+        ):
+            overall_scalar = winglet_scalar
+            overall_scalar_response = winglet_scalar_response
+        else:
+            overall_scalar = planar_scalar
+            overall_scalar_response = planar_scalar_response
+        scalar_wing = overall_scalar.get("wing") or overall_scalar.get("coarse_wing")
+        same_as_selected = bool(
+            isinstance(scalar_wing, dict)
+            and same_wing_geometry(selected_wing, scalar_wing)
+        )
+        overall_scalar["same_as_feasibility_first"] = same_as_selected
+        overall_scalar["selection_scope"] = "planar ve winglet aşamalarının tamamı"
+        selected_comparison = deepcopy(
+            selected_meta.get("selection_comparison", {})
+        )
+        selected_comparison["scalar_only"] = overall_scalar
+        selected_comparison["definition"] = (
+            "Planar ve winglet aşamalarının tümünde fizibilite-öncelikli sonuç ile "
+            "yalnız skaler toplam amacın seçeceği sonuç"
+        )
+        selected_meta["selection_comparison"] = selected_comparison
+        selected_meta["winglet_comparison"] = comparison
+        output_response = dict(selected_response)
+        output_response.pop("_scalar_only_alternative_response", None)
+        if not same_as_selected and overall_scalar_response is not None:
+            output_response["_scalar_only_alternative_response"] = dict(
+                overall_scalar_response
+            )
+        return selected_wing, selected_baseline, selected_meta, output_response
 
     if workflow_mode == "foil_only":
         foil, foil_response, foil_meta, selected_foil_dat_text = optimize_airfoil_with_flow5(
@@ -1810,6 +1903,62 @@ def run_flow5_native_design(
     if not project_payload:
         raise RuntimeError("flow5 son analizi tamamladı ancak çözümlenmiş .fl5 proje artifact'i üretmedi")
     flow5_project_bytes = base64.b64decode(project_payload["base64"])
+    step_payload = wing_response.get("artifact_payloads", {}).get("wing_step")
+    if not step_payload:
+        raise RuntimeError(
+            "flow5 son analizi tamamladı ancak OpenCascade STEP katısı üretmedi"
+        )
+    wing_step_bytes = base64.b64decode(step_payload["base64"])
+    if not wing_step_bytes.lstrip().startswith(b"ISO-10303-21;") or (
+        b"END-ISO-10303-21;" not in wing_step_bytes
+    ):
+        raise RuntimeError("flow5 runner geçerli bir ISO 10303 STEP dosyası döndürmedi")
+    if b"SI_UNIT($,.METRE.)" not in wing_step_bytes.replace(b" ", b""):
+        raise RuntimeError("flow5 runner STEP uzunluk birimini metre olarak doğrulamadı")
+
+    scalar_selection = wing_meta.get("selection_comparison", {}).get(
+        "scalar_only", {}
+    )
+    scalar_same = bool(scalar_selection.get("same_as_feasibility_first", False))
+    scalar_wing = scalar_selection.get("wing")
+    scalar_obj_text: str | None = None
+    scalar_results_text: str | None = None
+    scalar_step_bytes: bytes | None = None
+    scalar_project_bytes: bytes | None = None
+    scalar_project_payload: dict[str, Any] | None = None
+    scalar_step_payload: dict[str, Any] | None = None
+    if not scalar_same and isinstance(scalar_wing, dict):
+        scalar_response = wing_response.get("_scalar_only_alternative_response")
+        if not isinstance(scalar_response, dict):
+            raise RuntimeError(
+                "Skaler-puan alternatifi çözüldü ancak son flow5 yanıtı taşınmadı"
+            )
+        scalar_artifacts = scalar_response.get("artifact_payloads", {})
+        scalar_project_payload = scalar_artifacts.get("project_fl5")
+        scalar_step_payload = scalar_artifacts.get("wing_step")
+        if not scalar_project_payload or not scalar_step_payload:
+            raise RuntimeError(
+                "Skaler-puan alternatifi için .fl5 ve STEP çıktıları birlikte üretilemedi"
+            )
+        scalar_project_bytes = base64.b64decode(scalar_project_payload["base64"])
+        scalar_step_bytes = base64.b64decode(scalar_step_payload["base64"])
+        if not scalar_step_bytes.lstrip().startswith(b"ISO-10303-21;") or (
+            b"END-ISO-10303-21;" not in scalar_step_bytes
+        ):
+            raise RuntimeError(
+                "Skaler-puan alternatifi geçerli bir ISO 10303 STEP dosyası döndürmedi"
+            )
+        if b"SI_UNIT($,.METRE.)" not in scalar_step_bytes.replace(b" ", b""):
+            raise RuntimeError(
+                "Skaler-puan alternatifi STEP uzunluk birimini metre olarak doğrulamadı"
+            )
+        scalar_geometry = geometry_from_result(scalar_wing)
+        scalar_obj_text = wing_obj(
+            foil,
+            scalar_geometry,
+            section_foils=section_foils,
+        )
+        scalar_results_text = flow5_native_results_csv(foil, scalar_wing)
     snapshot = deepcopy(result)
     project_text = project_json(request, snapshot)
     bundle = flow5_bundle_bytes(
@@ -1821,7 +1970,13 @@ def run_flow5_native_design(
         polar_csv_text=polar_text,
         analysis_xml_text=analysis_text,
         flow5_project_bytes=flow5_project_bytes,
+        wing_step_bytes=wing_step_bytes,
         section_foil_dat_texts=section_foil_dat_texts,
+        scalar_only_wing_obj_text=scalar_obj_text,
+        scalar_only_wing_step_bytes=scalar_step_bytes,
+        scalar_only_results_csv_text=scalar_results_text,
+        scalar_only_flow5_project_bytes=scalar_project_bytes,
+        scalar_only_same_as_primary=scalar_same,
     )
     result["exports"] = {
         "airfoil_filename": f"{foil.name}.dat",
@@ -1832,6 +1987,8 @@ def run_flow5_native_design(
         "analysis_xml": analysis_text,
         "wing_obj_filename": "aeropt-wing.obj",
         "wing_obj": obj_text,
+        "wing_step_filename": "aeropt-wing.step",
+        "wing_step_base64": step_payload["base64"],
         "results_filename": "aeropt-flow5-results.csv",
         "results_csv": results_text,
         "project_filename": "aeropt-project.json",
@@ -1842,6 +1999,37 @@ def run_flow5_native_design(
         "flow5_project_base64": project_payload["base64"],
         "flow5_bundle_filename": "aeropt-flow5-native-package.zip",
         "flow5_bundle_base64": base64.b64encode(bundle).decode("ascii"),
+        "scalar_only_alternative": {
+            "available": bool(scalar_selection.get("available", False)),
+            "deliverable": bool(scalar_selection.get("deliverable", False)),
+            "same_as_feasibility_first": scalar_same,
+            "stage": scalar_selection.get("stage"),
+            "error": scalar_selection.get("error"),
+            "wing_obj_filename": (
+                "aeropt-scalar-only-wing.obj" if scalar_obj_text else None
+            ),
+            "wing_obj": scalar_obj_text,
+            "wing_step_filename": (
+                "aeropt-scalar-only-wing.step" if scalar_step_payload else None
+            ),
+            "wing_step_base64": (
+                scalar_step_payload.get("base64") if scalar_step_payload else None
+            ),
+            "results_filename": (
+                "aeropt-scalar-only-results.csv" if scalar_results_text else None
+            ),
+            "results_csv": scalar_results_text,
+            "flow5_project_filename": (
+                "aeropt-scalar-only-optimized.fl5"
+                if scalar_project_payload
+                else None
+            ),
+            "flow5_project_base64": (
+                scalar_project_payload.get("base64")
+                if scalar_project_payload
+                else None
+            ),
+        },
         "section_airfoils": (
             [
                 {

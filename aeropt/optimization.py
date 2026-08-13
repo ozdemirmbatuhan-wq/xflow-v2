@@ -126,7 +126,6 @@ def optimize_wing(
     sweep_bounds: tuple[float, float],
     twist_bounds: tuple[float, float],
     alpha_bounds: tuple[float, float],
-    max_root_bending_moment: float | None,
     effort: OptimizerEffort,
     seed: int,
     modes: int,
@@ -165,17 +164,11 @@ def optimize_wing(
             return 1e6
         lift_error = (wing.lift_n - target_lift) / target_scale
         stall_violation = max(0.0, wing.stall_ratio - 0.92)
-        bending_violation = 0.0
-        if max_root_bending_moment:
-            bending_violation = max(
-                0.0, wing.root_bending_moment_nm / max_root_bending_moment - 1.0
-            )
         # D/L is a useful scale-free drag objective; constraints dominate infeasible cases.
         return (
             wing.drag_n / target_scale
             + 260.0 * lift_error**2
             + 18.0 * stall_violation**2
-            + 30.0 * bending_violation**2
         )
 
     bounds = [span_bounds, root_chord_bounds, taper_bounds, sweep_bounds, twist_bounds]
@@ -215,11 +208,9 @@ def optimize_wing(
         distribution_points=101,
         polar_mesh=polar_mesh,
     )
-    max_bending = max_root_bending_moment or 0.0
     feasible = (
         abs(optimum.lift_n - target_lift) / target_scale <= 0.02
         and optimum.stall_ratio <= 1.0
-        and (not max_bending or optimum.root_bending_moment_nm <= 1.01 * max_bending)
     )
     metadata = {
         "success": bool(result.success or np.isfinite(result.fun)),
@@ -232,7 +223,6 @@ def optimize_wing(
         "drag_reduction_vs_rectangular_percent": float(
             100.0 * (baseline.drag_n - optimum.drag_n) / max(baseline.drag_n, 1e-9)
         ),
-        "max_root_bending_moment_nm": float(max_bending),
         "parallel_workers": worker_count,
         "section_polar_source": optimum.section_polar_source,
     }

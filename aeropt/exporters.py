@@ -303,7 +303,13 @@ def flow5_native_results_csv(foil: AirfoilLike, result: dict) -> str:
         ("performance", "lift", result["lift_n"], "N", "flow5"),
         ("performance", "drag", result["drag_n"], "N", "flow5"),
         ("performance", "L_over_D", result["ld"], "-", "flow5"),
-        ("performance", "root_bending_moment", result["root_bending_moment_nm"], "N m", "flow5"),
+        (
+            "performance",
+            "root_bending_moment",
+            result["root_bending_moment_nm"],
+            "N m",
+            "flow5 telemetry; not a selection condition",
+        ),
     ]
     if geometry.get("winglet_active"):
         rows.extend(
@@ -349,6 +355,114 @@ def project_json(payload: dict, result: dict) -> str:
     return json.dumps({"input": payload, "result": result}, ensure_ascii=False, indent=2)
 
 
+def _wing_foil_contours(
+    foil: AirfoilLike,
+    *,
+    points_per_side: int = 81,
+    section_foils: tuple[AirfoilLike, AirfoilLike, AirfoilLike] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    foil_sections = section_foils or (foil, foil, foil)
+    contours: list[np.ndarray] = []
+    for section_foil in foil_sections:
+        contour_x, contour_z = naca4_coordinates(section_foil, points_per_side)
+        if np.hypot(contour_x[0] - contour_x[-1], contour_z[0] - contour_z[-1]) < 1e-8:
+            contour_x = contour_x[:-1]
+            contour_z = contour_z[:-1]
+        contours.append(np.column_stack((contour_x, contour_z)))
+    if len({len(contour) for contour in contours}) != 1:
+        raise ValueError("Kanat kesit profilleri aynı koordinat sayısını kullanmalı")
+    return contours[0], contours[1], contours[2]
+
+
+def _wing_station_points(
+    wing: WingGeometry,
+    contours: tuple[np.ndarray, np.ndarray, np.ndarray],
+    *,
+    side: int,
+    kind: str,
+    fraction: float,
+) -> np.ndarray:
+    if kind == "main":
+        chord = wing.chord_at(fraction)
+        x_offset = wing.le_offset_at(fraction)
+        twist = radians(wing.twist_at(fraction))
+        y_center = side * fraction * wing.main_semispan
+        z_center = 0.0
+        normal_y = 0.0
+        normal_z = 1.0
+        if fraction <= wing.mid_span_fraction:
+            blend = fraction / max(wing.mid_span_fraction, 1.0e-12)
+            first, second = contours[0], contours[1]
+        else:
+            blend = (fraction - wing.mid_span_fraction) / max(
+                1.0 - wing.mid_span_fraction, 1.0e-12
+            )
+            first, second = contours[1], contours[2]
+        contour = (1.0 - blend) * first + blend * second
+    elif kind == "winglet":
+        cant = radians(wing.winglet_cant_deg)
+        distance = fraction * wing.winglet_developed_length
+        chord = wing.winglet_root_chord + fraction * (
+            wing.winglet_tip_chord - wing.winglet_root_chord
+        )
+        x_offset = wing.tip_le_offset + fraction * (
+            wing.winglet_tip_le_offset - wing.tip_le_offset
+        )
+        twist = radians(wing.tip_twist_deg + fraction * wing.winglet_toe_deg)
+        y_center = side * (wing.main_semispan + distance * cos(cant))
+        z_center = distance * sin(cant)
+        normal_y = -side * sin(cant)
+        normal_z = cos(cant)
+        contour = contours[2]
+    else:
+        raise ValueError(f"Bilinmeyen kanat kesiti: {kind}")
+
+    x_quarter = (contour[:, 0] - 0.25) * chord
+    normal_offset = contour[:, 1] * chord
+    x_rotated = x_quarter * cos(twist) + normal_offset * sin(twist)
+    normal_rotated = -x_quarter * sin(twist) + normal_offset * cos(twist)
+    return np.column_stack(
+        (
+            x_offset + 0.25 * chord + x_rotated,
+            y_center + normal_y * normal_rotated,
+            z_center + normal_z * normal_rotated,
+        )
+    )
+
+
+def wing_step_sections(
+    foil: AirfoilLike,
+    wing: WingGeometry,
+    *,
+    points_per_side: int = 81,
+    section_foils: tuple[AirfoilLike, AirfoilLike, AirfoilLike] | None = None,
+) -> list[list[list[float]]]:
+    """Return matched closed section contours for an OpenCascade STEP loft."""
+    contours = _wing_foil_contours(
+        foil, points_per_side=points_per_side, section_foils=section_foils
+    )
+    positive_stations: list[tuple[str, float]] = [
+        ("main", 0.0),
+        ("main", wing.mid_span_fraction),
+        ("main", 1.0),
+    ]
+    if wing.winglet_active:
+        if not wing.winglet_geometry_valid:
+            raise ValueError("Winglet yatay izdüşümü ana yarı açıklığı tüketiyor")
+        positive_stations.append(("winglet", 1.0))
+    stations = [
+        (-1, kind, fraction) for kind, fraction in reversed(positive_stations[1:])
+    ]
+    stations.append((1, "main", 0.0))
+    stations.extend((1, kind, fraction) for kind, fraction in positive_stations[1:])
+    return [
+        _wing_station_points(
+            wing, contours, side=side, kind=kind, fraction=fraction
+        ).astype(float).tolist()
+        for side, kind, fraction in stations
+    ]
+
+
 def wing_obj(
     foil: AirfoilLike,
     wing: WingGeometry,
@@ -360,15 +474,10 @@ def wing_obj(
     """Create a connected 3D mesh of the planar wing and optional winglets."""
     if span_sections < 3:
         raise ValueError("OBJ için en az üç açıklık istasyonu gerekli")
-    foil_sections = section_foils or (foil, foil, foil)
-    contours: list[tuple[np.ndarray, np.ndarray]] = []
-    for section_foil in foil_sections:
-        contour_x, contour_z = naca4_coordinates(section_foil, points_per_side)
-        if np.hypot(contour_x[0] - contour_x[-1], contour_z[0] - contour_z[-1]) < 1e-8:
-            contour_x = contour_x[:-1]
-            contour_z = contour_z[:-1]
-        contours.append((contour_x, contour_z))
-    section_size = len(contours[0][0])
+    contours = _wing_foil_contours(
+        foil, points_per_side=points_per_side, section_foils=section_foils
+    )
+    section_size = len(contours[0])
 
     main_half_count = max(3, (span_sections + 1) // 2)
     positive_stations: list[tuple[str, float]] = [
@@ -397,87 +506,12 @@ def wing_obj(
     stations.append((1, "main", 0.0))
     stations.extend((1, kind, fraction) for kind, fraction in positive_stations[1:])
 
-    def station_data(
-        side: int, kind: str, fraction: float
-    ) -> tuple[
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        float,
-        tuple[np.ndarray, np.ndarray],
-    ]:
-        if kind == "main":
-            chord = wing.chord_at(fraction)
-            x_offset = wing.le_offset_at(fraction)
-            twist = radians(wing.twist_at(fraction))
-            y_center = side * fraction * wing.main_semispan
-            z_center = 0.0
-            normal_y = 0.0
-            normal_z = 1.0
-            if fraction <= 0.5:
-                blend = 2.0 * fraction
-                first, second = contours[0], contours[1]
-            else:
-                blend = 2.0 * (fraction - 0.5)
-                first, second = contours[1], contours[2]
-            contour = (
-                (1.0 - blend) * first[0] + blend * second[0],
-                (1.0 - blend) * first[1] + blend * second[1],
-            )
-        else:
-            cant = radians(wing.winglet_cant_deg)
-            distance = fraction * wing.winglet_developed_length
-            chord = wing.winglet_root_chord + fraction * (
-                wing.winglet_tip_chord - wing.winglet_root_chord
-            )
-            x_offset = wing.tip_le_offset + fraction * (
-                wing.winglet_tip_le_offset - wing.tip_le_offset
-            )
-            twist = radians(wing.tip_twist_deg + fraction * wing.winglet_toe_deg)
-            y_center = side * (
-                wing.main_semispan + distance * cos(cant)
-            )
-            z_center = distance * sin(cant)
-            normal_y = -side * sin(cant)
-            normal_z = cos(cant)
-            contour = contours[2]
-        return (
-            chord,
-            x_offset,
-            twist,
-            y_center,
-            z_center,
-            normal_y,
-            normal_z,
-            contour,
-        )
-
     rows = ["# AeroOpt optimized wing", f"o {foil.name}-wing"]
     for side, kind, fraction in stations:
-        (
-            chord,
-            x_offset,
-            twist,
-            y_center,
-            z_center,
-            normal_y,
-            normal_z,
-            contour,
-        ) = station_data(side, kind, fraction)
-        contour_x, contour_z = contour
-        for x_over_c, z_over_c in zip(contour_x, contour_z):
-            x_quarter = (x_over_c - 0.25) * chord
-            z_local = z_over_c * chord
-            x_rotated = x_quarter * cos(twist) + z_local * sin(twist)
-            normal_offset = -x_quarter * sin(twist) + z_local * cos(twist)
-            rows.append(
-                f"v {x_offset + 0.25 * chord + x_rotated:.8f} "
-                f"{y_center + normal_y * normal_offset:.8f} "
-                f"{z_center + normal_z * normal_offset:.8f}"
-            )
+        points = _wing_station_points(
+            wing, contours, side=side, kind=kind, fraction=fraction
+        )
+        rows.extend(f"v {x:.8f} {y:.8f} {z:.8f}" for x, y, z in points)
     for station in range(len(stations) - 1):
         first = station * section_size + 1
         second = (station + 1) * section_size + 1
@@ -520,23 +554,49 @@ def flow5_bundle_bytes(
     polar_csv_text: str | None,
     analysis_xml_text: str | None = None,
     flow5_project_bytes: bytes | None = None,
+    wing_step_bytes: bytes | None = None,
     section_foil_dat_texts: tuple[str, str, str] | None = None,
+    scalar_only_wing_obj_text: str | None = None,
+    scalar_only_wing_step_bytes: bytes | None = None,
+    scalar_only_results_csv_text: str | None = None,
+    scalar_only_flow5_project_bytes: bytes | None = None,
+    scalar_only_same_as_primary: bool | None = None,
 ) -> bytes:
     """Package the exact foil, 3D wing, plane definition and analysis data together."""
     output = io.BytesIO()
     solved_line = (
-        "6. aeropt-optimized.fl5 gerçek flow5 analiz projesidir; flow5 içinde doğrudan açın."
+        "7. aeropt-optimized.fl5 gerçek flow5 analiz projesidir; flow5 içinde doğrudan açın."
         if flow5_project_bytes
-        else "6. Bu pakette çözülmüş .fl5 yoktur; 3B analizi flow5 içinde başlatın."
+        else "7. Bu pakette çözülmüş .fl5 yoktur; 3B analizi flow5 içinde başlatın."
     )
+    step_line = (
+        "4. aeropt-wing.step, metre biriminde kapalı OpenCascade loft katısıdır."
+        if wing_step_bytes
+        else "4. Bu pakette STEP katısı yoktur."
+    )
+    if scalar_only_same_as_primary is True:
+        scalar_line = (
+            "8. Fizibilite önceliği kaldırıldığında da aynı kanat seçildi; ayrı dosya çoğaltılmadı."
+        )
+    elif scalar_only_wing_obj_text and scalar_only_wing_step_bytes:
+        scalar_line = (
+            "8. aeropt-scalar-only-wing.* dosyaları, fizibilite önceliği olmadan yalnız "
+            "skaler toplam amacın seçtiği ayrı kanattır."
+        )
+    elif scalar_only_same_as_primary is False:
+        scalar_line = "8. Skaler-puan alternatifi raporlandı ancak teslim edilebilir CAD çıktısı üretilemedi."
+    else:
+        scalar_line = ""
     guide = f"""AeroOpt flow5 aktarım paketi
 
 1. aeropt-airfoil.dat profilini içe aktarın.
 2. aeropt-wing.xml uçak/kanat tanımını içe aktarın.
 3. aeropt-wing.obj, flow5 7.57 içinde 3B geometri kontrolü için kullanılabilir.
-4. xfoil-polar.csv varsa polar kaynağını aeropt-project.json içindeki polar_source alanından kontrol edin.
-5. aeropt-analysis.xml son flow5 analiz ayarlarını içerir.
+{step_line}
+5. xfoil-polar.csv varsa polar kaynağını aeropt-project.json içindeki polar_source alanından kontrol edin.
+6. aeropt-analysis.xml son flow5 analiz ayarlarını içerir.
 {solved_line}
+{scalar_line}
 
 Kaynak etiketi flow5 olan sayılar AeroOpt korelasyonundan değil flow5 API çıktısından alınmıştır.
 """
@@ -548,6 +608,8 @@ Kaynak etiketi flow5 olan sayılar AeroOpt korelasyonundan değil flow5 API çı
                 archive.writestr(f"aeropt-airfoil-{station}.dat", text)
         archive.writestr("aeropt-wing.xml", plane_xml_text)
         archive.writestr("aeropt-wing.obj", wing_obj_text)
+        if wing_step_bytes:
+            archive.writestr("aeropt-wing.step", wing_step_bytes)
         archive.writestr("aeropt-results.csv", results_csv_text)
         archive.writestr("aeropt-project.json", project_json_text)
         if polar_csv_text:
@@ -556,4 +618,15 @@ Kaynak etiketi flow5 olan sayılar AeroOpt korelasyonundan değil flow5 API çı
             archive.writestr("aeropt-analysis.xml", analysis_xml_text)
         if flow5_project_bytes:
             archive.writestr("aeropt-optimized.fl5", flow5_project_bytes)
+        if scalar_only_wing_obj_text:
+            archive.writestr("aeropt-scalar-only-wing.obj", scalar_only_wing_obj_text)
+        if scalar_only_wing_step_bytes:
+            archive.writestr("aeropt-scalar-only-wing.step", scalar_only_wing_step_bytes)
+        if scalar_only_results_csv_text:
+            archive.writestr("aeropt-scalar-only-results.csv", scalar_only_results_csv_text)
+        if scalar_only_flow5_project_bytes:
+            archive.writestr(
+                "aeropt-scalar-only-optimized.fl5",
+                scalar_only_flow5_project_bytes,
+            )
     return output.getvalue()

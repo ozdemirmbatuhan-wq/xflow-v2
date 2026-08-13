@@ -47,7 +47,6 @@ def wing_objective_specs(
     """Return the fixed minimization objectives used by a wing search."""
     specs = [
         {"key": "mean_drag_n", "label": "Ortalama sürükleme", "unit": "N", "direction": "min"},
-        {"key": "max_root_bending_moment_nm", "label": "Maksimum kök momenti", "unit": "N·m", "direction": "min"},
         {"key": "worst_stall_ratio", "label": "En kötü stall kullanımı", "unit": "-", "direction": "min"},
     ]
     if structural_enabled:
@@ -76,14 +75,6 @@ def _wing_candidate_metrics(candidate: WingCandidate) -> dict[str, float]:
     )
     return {
         "mean_drag_n": float(np.mean([float(item["drag_n"]) for item in candidate.conditions])),
-        "max_root_bending_moment_nm": float(
-            np.max(
-                [
-                    float(item.get("point", {}).get("root_bending_moment_nm", 0.0))
-                    for item in candidate.conditions
-                ]
-            )
-        ),
         "worst_stall_ratio": float(
             np.max([float(item.get("stall_ratio", math.inf)) for item in candidate.conditions])
         ),
@@ -110,11 +101,7 @@ def wing_candidate_objectives(
     return np.asarray([metrics.get(key, math.inf) for key in objective_keys], dtype=float)
 
 
-def wing_constraint_violation(
-    candidate: WingCandidate,
-    *,
-    max_root_bending_moment_nm: float | None = None,
-) -> float:
+def wing_constraint_violation(candidate: WingCandidate) -> float:
     """Aggregate normalized hard-constraint violation for NSGA-II constraint domination."""
     if not candidate.conditions or not math.isfinite(candidate.score) or not candidate.response:
         return math.inf
@@ -126,9 +113,6 @@ def wing_constraint_violation(
             violation += 1.0
         if not point.get("viscous_converged", True):
             violation += 1.0
-        if max_root_bending_moment_nm:
-            moment = float(point.get("root_bending_moment_nm", 0.0))
-            violation += max(0.0, moment / max_root_bending_moment_nm - 1.0)
     structure = candidate.structural or {}
     if structure.get("enabled"):
         if not structure.get("performed"):
@@ -149,20 +133,93 @@ def wing_constraint_violation(
     return float(violation)
 
 
+def wing_candidate_selection_key(candidate: WingCandidate) -> tuple[float, float]:
+    """Rank a deliverable candidate by hard constraints before scalar quality."""
+    violation = wing_constraint_violation(candidate)
+    score = float(candidate.score)
+    return (
+        violation if math.isfinite(violation) else math.inf,
+        score if math.isfinite(score) else math.inf,
+    )
+
+
+def select_wing_finalist_indices(
+    candidates: Sequence[WingCandidate],
+    finalist_count: int,
+    objective_keys: Sequence[str],
+    *,
+    optimizer: str,
+) -> tuple[list[int], dict[str, Any]]:
+    """Keep feasibility-first finalists and append the scalar-only winner."""
+    if not candidates:
+        raise ValueError("Finalist seçimi için en az bir kanat adayı gerekli")
+    requested = max(1, min(int(finalist_count), len(candidates)))
+    feasibility_index = min(
+        range(len(candidates)),
+        key=lambda index: (*wing_candidate_selection_key(candidates[index]), index),
+    )
+    scalar_index = min(
+        range(len(candidates)),
+        key=lambda index: (
+            float(candidates[index].score)
+            if math.isfinite(float(candidates[index].score))
+            else math.inf,
+            index,
+        ),
+    )
+    selected = [feasibility_index]
+    if optimizer == "nsga2":
+        fronts, _, crowding = nsga2_rank_and_crowding(candidates, objective_keys)
+        for front in fronts:
+            for index in sorted(
+                front,
+                key=lambda item_index: (
+                    crowding.get(item_index, 0.0),
+                    -float(candidates[item_index].score),
+                    -item_index,
+                ),
+                reverse=True,
+            ):
+                if index not in selected:
+                    selected.append(index)
+                if len(selected) >= requested:
+                    break
+            if len(selected) >= requested:
+                break
+    else:
+        for index in sorted(
+            range(len(candidates)),
+            key=lambda item_index: (
+                *wing_candidate_selection_key(candidates[item_index]),
+                item_index,
+            ),
+        ):
+            if index not in selected:
+                selected.append(index)
+            if len(selected) >= requested:
+                break
+
+    scalar_added = scalar_index not in selected
+    if scalar_added:
+        # This diagnostic candidate does not consume the user's finalist quota.
+        selected.append(scalar_index)
+    return selected, {
+        "requested_finalists": requested,
+        "evaluated_finalists": len(selected),
+        "feasibility_first_search_index": int(feasibility_index),
+        "scalar_only_search_index": int(scalar_index),
+        "scalar_only_diagnostic_added": bool(scalar_added),
+    }
+
+
 def constrained_dominates(
     left: WingCandidate,
     right: WingCandidate,
     objective_keys: Sequence[str],
-    *,
-    max_root_bending_moment_nm: float | None = None,
 ) -> bool:
     """Deb-style constraint domination followed by Pareto domination."""
-    left_violation = wing_constraint_violation(
-        left, max_root_bending_moment_nm=max_root_bending_moment_nm
-    )
-    right_violation = wing_constraint_violation(
-        right, max_root_bending_moment_nm=max_root_bending_moment_nm
-    )
+    left_violation = wing_constraint_violation(left)
+    right_violation = wing_constraint_violation(right)
     tolerance = 1e-12
     if left_violation < right_violation - tolerance:
         return True
@@ -179,8 +236,6 @@ def constrained_dominates(
 def fast_non_dominated_sort(
     candidates: Sequence[WingCandidate],
     objective_keys: Sequence[str],
-    *,
-    max_root_bending_moment_nm: float | None = None,
 ) -> list[list[int]]:
     """Return NSGA-II fronts as candidate indices."""
     count = len(candidates)
@@ -193,13 +248,11 @@ def fast_non_dominated_sort(
                 candidates[left_index],
                 candidates[right_index],
                 objective_keys,
-                max_root_bending_moment_nm=max_root_bending_moment_nm,
             )
             right_dominates = constrained_dominates(
                 candidates[right_index],
                 candidates[left_index],
                 objective_keys,
-                max_root_bending_moment_nm=max_root_bending_moment_nm,
             )
             if left_dominates:
                 dominated_sets[left_index].append(right_index)
@@ -261,14 +314,8 @@ def crowding_distances(
 def nsga2_rank_and_crowding(
     candidates: Sequence[WingCandidate],
     objective_keys: Sequence[str],
-    *,
-    max_root_bending_moment_nm: float | None = None,
 ) -> tuple[list[list[int]], dict[int, int], dict[int, float]]:
-    fronts = fast_non_dominated_sort(
-        candidates,
-        objective_keys,
-        max_root_bending_moment_nm=max_root_bending_moment_nm,
-    )
+    fronts = fast_non_dominated_sort(candidates, objective_keys)
     ranks: dict[int, int] = {}
     crowding: dict[int, float] = {}
     for rank, front in enumerate(fronts):
@@ -281,14 +328,8 @@ def nsga2_environmental_selection(
     candidates: Sequence[WingCandidate],
     population_size: int,
     objective_keys: Sequence[str],
-    *,
-    max_root_bending_moment_nm: float | None = None,
 ) -> list[WingCandidate]:
-    fronts, _, crowding = nsga2_rank_and_crowding(
-        candidates,
-        objective_keys,
-        max_root_bending_moment_nm=max_root_bending_moment_nm,
-    )
+    fronts, _, crowding = nsga2_rank_and_crowding(candidates, objective_keys)
     selected: list[WingCandidate] = []
     for front in fronts:
         remaining = population_size - len(selected)
@@ -314,10 +355,6 @@ def _wing_tradeoff_summary(
         return None
     drag_values = [float(item["drag_n"]) for item in candidate.conditions]
     ld_values = [float(item["ld"]) for item in candidate.conditions]
-    bending_values = [
-        float(item.get("point", {}).get("root_bending_moment_nm", 0.0))
-        for item in candidate.conditions
-    ]
     stall_values = [float(item.get("stall_ratio", math.inf)) for item in candidate.conditions]
     structure = candidate.structural or {}
     hydro = candidate.hydro or {}
@@ -351,7 +388,6 @@ def _wing_tradeoff_summary(
         "maximum_drag_n": float(np.max(drag_values)),
         "mean_ld": float(np.mean(ld_values)),
         "minimum_ld": float(np.min(ld_values)),
-        "max_root_bending_moment_nm": float(np.max(bending_values)),
         "worst_stall_ratio": float(np.max(stall_values)),
         "estimated_material_mass_kg": (
             float(structure["estimated_wing_material_mass_kg"])
@@ -418,7 +454,7 @@ def build_pareto_analysis(
             other is not candidate and dominates(other, candidate) for other in summaries
         )
     frontier = [item for item in summaries if item["on_pareto_front"]]
-    frontier.sort(key=lambda item: (item["mean_drag_n"], item["max_root_bending_moment_nm"]))
+    frontier.sort(key=lambda item: (item["mean_drag_n"], item["id"]))
     if len(frontier) > 48:
         indices = np.linspace(0, len(frontier) - 1, 48, dtype=int)
         frontier = [frontier[int(index)] for index in indices]
@@ -1364,7 +1400,6 @@ def _wing_conditions(
     fluid: Fluid,
     target_lift_n: float,
     alpha_bounds: tuple[float, float],
-    max_root_bending_moment_nm: float | None,
 ) -> tuple[float, list[dict[str, Any]]]:
     drag_ratios: list[float] = []
     conditions: list[dict[str, Any]] = []
@@ -1381,14 +1416,9 @@ def _wing_conditions(
         stall_ratio = target_cl / max(cl_peak, 1e-8)
         q_area = fluid.dynamic_pressure(speed) * geometry.area
         drag_n = q_area * float(point["cd"])
-        bending = float(point.get("root_bending_moment_nm", 0.0))
-        bending_violation = 0.0
-        if max_root_bending_moment_nm:
-            bending_violation = max(0.0, bending / max_root_bending_moment_nm - 1.0)
         penalty += (
             0.018 * alpha_violation**2
             + 0.65 * max(0.0, stall_ratio - 0.92) ** 2
-            + 1.2 * bending_violation**2
             + (0.8 if point.get("out_of_mesh") else 0.0)
         )
         drag_ratios.append(drag_n / max(target_lift_n, 1e-9))
@@ -1553,7 +1583,6 @@ def optimize_wing_with_flow5(
     sweep_bounds: tuple[float, float],
     twist_bounds: tuple[float, float],
     alpha_bounds: tuple[float, float],
-    max_root_bending_moment_nm: float | None,
     candidate_budget: int,
     finalists: int,
     seed: int,
@@ -1684,7 +1713,6 @@ def optimize_wing_with_flow5(
                 fluid,
                 target_lift_n,
                 alpha_bounds,
-                max_root_bending_moment_nm,
             )
             structural = analyze_structure(
                 geometry=geometry,
@@ -1784,7 +1812,6 @@ def optimize_wing_with_flow5(
         fronts = fast_non_dominated_sort(
             usable,
             objective_keys,
-            max_root_bending_moment_nm=max_root_bending_moment_nm,
         )
         return len(fronts[0]) if fronts else 0
 
@@ -2098,7 +2125,6 @@ def optimize_wing_with_flow5(
                 _, ranks, crowding = nsga2_rank_and_crowding(
                     population,
                     objective_keys,
-                    max_root_bending_moment_nm=max_root_bending_moment_nm,
                 )
                 remaining = min(
                     population_size,
@@ -2135,14 +2161,12 @@ def optimize_wing_with_flow5(
                     [*population, *offspring],
                     population_size,
                     objective_keys,
-                    max_root_bending_moment_nm=max_root_bending_moment_nm,
                 )
                 observe_wing_budget()
                 save_population_checkpoint()
             final_fronts, _, _ = nsga2_rank_and_crowding(
                 population,
                 objective_keys,
-                max_root_bending_moment_nm=max_root_bending_moment_nm,
             )
             nsga2_report.update(
                 population_size=population_size,
@@ -2210,38 +2234,19 @@ def optimize_wing_with_flow5(
     if not valid_search:
         errors = "; ".join(item.error for item in candidates if item.error)[:900]
         raise RuntimeError(f"flow5 kanat aramasında geçerli aday bulunamadı: {errors}")
-    finalist_count = max(1, min(finalists, len(valid_search)))
+    selected_indices, finalist_selection = select_wing_finalist_indices(
+        valid_search,
+        finalists,
+        objective_keys,
+        optimizer=optimizer_key,
+    )
+    selected_for_final = [valid_search[index] for index in selected_indices]
     if optimizer_key == "nsga2":
-        fronts, _, crowding = nsga2_rank_and_crowding(
-            valid_search,
-            objective_keys,
-            max_root_bending_moment_nm=max_root_bending_moment_nm,
-        )
-        compromise_index = min(
-            range(len(valid_search)), key=lambda index: valid_search[index].score
-        )
-        selected_indices = [compromise_index]
-        for front in fronts:
-            for index in sorted(
-                front,
-                key=lambda item_index: (
-                    crowding.get(item_index, 0.0),
-                    -valid_search[item_index].score,
-                ),
-                reverse=True,
-            ):
-                if index not in selected_indices:
-                    selected_indices.append(index)
-                if len(selected_indices) >= finalist_count:
-                    break
-            if len(selected_indices) >= finalist_count:
-                break
-        selected_for_final = [valid_search[index] for index in selected_indices]
         nsga2_report["finalist_selection"] = (
-            "lowest scalar compromise + crowding-diverse Pareto representatives"
+            "lowest hard-constraint violation, then scalar compromise + "
+            "crowding-diverse Pareto representatives; scalar-only winner is "
+            "always retained as a diagnostic"
         )
-    else:
-        selected_for_final = sorted(valid_search, key=lambda item: item.score)[:finalist_count]
     final_candidates: list[WingCandidate] = []
     for index, item in enumerate(selected_for_final):
         _check_cancelled(cancel_event)
@@ -2259,7 +2264,8 @@ def optimize_wing_with_flow5(
     if not valid_final:
         errors = "; ".join(item.error for item in final_candidates if item.error)[:900]
         raise RuntimeError(f"flow5 son panel doğrulamasında geçerli kanat bulunamadı: {errors}")
-    coarse_optimum = min(valid_final, key=lambda item: item.score)
+    coarse_optimum = min(valid_final, key=wing_candidate_selection_key)
+    scalar_coarse_optimum = min(valid_final, key=lambda item: item.score)
     output_mesh = convergence_mesh if mesh_convergence_enabled else final_mesh
     optimum = evaluate(
         coarse_optimum.geometry,
@@ -2293,6 +2299,59 @@ def optimize_wing_with_flow5(
             "conditions": [],
         }
     )
+
+    same_scalar_geometry = bool(
+        np.allclose(
+            vector_from_geometry(coarse_optimum.geometry),
+            vector_from_geometry(scalar_coarse_optimum.geometry),
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+    )
+    scalar_optimum: WingCandidate | None
+    scalar_convergence: dict[str, Any] | None
+    scalar_output_error: str | None = None
+    if same_scalar_geometry:
+        scalar_optimum = optimum
+        scalar_convergence = convergence
+    else:
+        scalar_optimum = evaluate(
+            scalar_coarse_optimum.geometry,
+            final_method,
+            alpha_step_final_deg,
+            True,
+            output_mesh,
+        )
+        _emit_progress(
+            progress_callback,
+            "scalar_only_final",
+            1,
+            1,
+            "Fizibilite önceliği olmayan alternatif yüksek çözünürlükte çözüldü",
+        )
+        if not math.isfinite(scalar_optimum.score) or not scalar_optimum.response:
+            scalar_output_error = scalar_optimum.error or (
+                "Skaler-puan alternatifi yüksek çözünürlüklü son ağda çözülemedi"
+            )
+            scalar_optimum = None
+            scalar_convergence = None
+        else:
+            scalar_convergence = (
+                mesh_convergence_report(
+                    scalar_coarse_optimum,
+                    scalar_optimum,
+                    cd_tolerance_percent=mesh_cd_tolerance_percent,
+                    alpha_tolerance_deg=mesh_alpha_tolerance_deg,
+                )
+                if mesh_convergence_enabled
+                else {
+                    "enabled": False,
+                    "passed": True,
+                    "coarse_mesh": final_mesh.to_dict(),
+                    "fine_mesh": final_mesh.to_dict(),
+                    "conditions": [],
+                }
+            )
 
     # The reference is deliberately equal-area; it is a comparison, not a search candidate.
     baseline_chord = float(optimum.geometry.area / optimum.geometry.span)
@@ -2388,24 +2447,58 @@ def optimize_wing_with_flow5(
 
     optimum_result = as_result(optimum)
     baseline_result = as_result(baseline)
-    feasible = all(
-        item["stall_ratio"] <= 1.0
-        and not item["point"].get("out_of_mesh", False)
-        and item["point"].get("viscous_converged", True)
-        and (
-            not max_root_bending_moment_nm
-            or float(item["point"].get("root_bending_moment_nm", 0.0))
-            <= 1.01 * max_root_bending_moment_nm
-        )
-        for item in optimum.conditions or []
-    ) and bool(convergence["passed"]) and bool(
-        (optimum.structural or {}).get("passed", not structural_settings.enabled)
-    ) and bool(
-        (optimum.hydro or {}).get(
-            "constraint_passed",
-            (optimum.hydro or {}).get("passed", not hydro_settings.enabled),
-        )
+    feasible = bool(
+        wing_constraint_violation(optimum) <= 1.0e-12
+        and convergence["passed"]
     )
+    scalar_result = as_result(scalar_optimum) if scalar_optimum is not None else None
+    scalar_violation = (
+        wing_constraint_violation(scalar_optimum)
+        if scalar_optimum is not None
+        else wing_constraint_violation(scalar_coarse_optimum)
+    )
+    scalar_feasible = bool(
+        scalar_optimum is not None
+        and scalar_violation <= 1.0e-12
+        and scalar_convergence is not None
+        and scalar_convergence.get("passed", False)
+    )
+    selection_comparison = {
+        "definition": (
+            "Aynı finalist havuzunda sert-kısıt önceliği ile yalnız skaler toplam "
+            "amaç seçiminin karşılaştırması"
+        ),
+        "feasibility_first": {
+            "policy": "önce en düşük sert-kısıt ihlali, eşitlikte en düşük skaler amaç",
+            "available": True,
+            "deliverable": True,
+            "feasible": bool(feasible),
+            "constraint_violation": float(wing_constraint_violation(optimum)),
+            "objective": float(optimum.score),
+            "mesh_convergence": convergence,
+            "wing": optimum_result,
+        },
+        "scalar_only": {
+            "policy": "fizibilite önceliği yok; yalnız en düşük skaler toplam amaç",
+            "available": scalar_result is not None,
+            "deliverable": scalar_result is not None,
+            "same_as_feasibility_first": bool(same_scalar_geometry),
+            "feasible": bool(scalar_feasible),
+            "constraint_violation": float(scalar_violation),
+            "objective": float(
+                scalar_optimum.score
+                if scalar_optimum is not None
+                else scalar_coarse_optimum.score
+            ),
+            "mesh_convergence": scalar_convergence,
+            "wing": scalar_result,
+            "coarse_wing": (
+                None if scalar_result is not None else as_result(scalar_coarse_optimum)
+            ),
+            "error": scalar_output_error,
+        },
+        "finalist_selection": finalist_selection,
+    }
     if checkpoint_store is not None and checkpoint_key:
         checkpoint_store.clear(checkpoint_key)
         checkpoint_report["generations_completed"] = completed_generation
@@ -2425,6 +2518,7 @@ def optimize_wing_with_flow5(
             evaluations=search_evaluations
         ),
         "valid_search_candidates": len(valid_search),
+        "finalists_requested": int(finalist_selection["requested_finalists"]),
         "finalists_evaluated": len(final_candidates),
         "high_resolution_final_evaluated": True,
         "threads_inside_flow5": int(total_threads),
@@ -2439,7 +2533,6 @@ def optimize_wing_with_flow5(
             * (baseline_result["drag_n"] - optimum_result["drag_n"])
             / max(baseline_result["drag_n"], 1e-12)
         ),
-        "max_root_bending_moment_nm": float(max_root_bending_moment_nm or 0.0),
         "conditions": optimum.conditions,
         "solver_telemetry": {
             "out_of_mesh_points": sum(
@@ -2490,6 +2583,7 @@ def optimize_wing_with_flow5(
         "hydro_check": optimum.hydro
         or {"enabled": False, "performed": False, "passed": True},
         "pareto_analysis": pareto_analysis,
+        "selection_comparison": selection_comparison,
         "solver": optimum.response.get("solver", {}) if optimum.response else {},
         "top_search_candidates": [
             {
@@ -2500,4 +2594,9 @@ def optimize_wing_with_flow5(
             for rank, item in enumerate(sorted(valid_search, key=lambda item: item.score)[:20])
         ],
     }
-    return optimum_result, baseline_result, metadata, optimum.response or {}
+    output_response = dict(optimum.response or {})
+    if scalar_optimum is not None and not same_scalar_geometry:
+        output_response["_scalar_only_alternative_response"] = dict(
+            scalar_optimum.response or {}
+        )
+    return optimum_result, baseline_result, metadata, output_response
