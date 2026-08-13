@@ -7,9 +7,11 @@ Son kullanıcı için önerilen yol, depo kökündeki `Build Windows EXE with fl
 Runner iki işlem yapar:
 
 - `foil`: DAT profilini yükler; her Reynolds/Mach noktası için `XFoilTask` ile Tip-1 polar çözer.
-- `wing`: Bir veya üç DAT profiliyle planar ya da dört-kesitli winglet plane XML'ini yükler; `PlaneTask` ile LLT/VLM/panel polarlarını ve gömülü XFoil üzerinden viskoz drag'i çözer; istenirse projeyi `.fl5` olarak kaydeder.
+- `wing`: Bir veya üç DAT profiliyle planar ya da dört-kesitli winglet plane XML'ini yükler; `PlaneTask` ile LLT/VLM/panel polarlarını ve gömülü XFoil üzerinden viskoz drag'i çözer; istenirse projeyi `.fl5` olarak kaydeder ve eşlenmiş profil kesitlerinden metre birimli kapalı OpenCascade loft katısını `.step` olarak yazar.
 
 Kanat yanıtı yalnız toplam katsayıları değil, eşleşen gerçek `PlaneOpp/WingOpp` çalışma noktasından `out_of_mesh`, viskoz yakınsama oranı, panel sayıları, `Cp_min` ve spanwise yerel Cl/yük/Re/CDi/CDv/eğilme/twist dağılımını da döndürür. Finalist panel telemetrisi istendiğinde hedef taşımaya en yakın çalışma noktasındaki her panelin köşeleri, merkezi, normali, alanı, yüzey/bileşen etiketi ve Cp değeri de yanıtlanır. Üçgen yöntemlerde flow5'in üç düğüm Cp'si ortalanır; quad/VLM yöntemlerinde v7.57 `WingOpp::m_dCp` dizisi kullanılır. AeroOpt bu telemetriyi mesh yakınsaması, yapısal ön tarama ve panel-bazlı su kavitasyon haritasında kullanır.
+
+STEP dışa aktarımı çözüm ağından türetilmiş üçgen yüzey değildir. Python tarafı planar kanat için 5, wingletli kanat için 7 kapalı kesit gönderir; runner bunları Gmsh/OpenCascade `addThruSections` ile kurallı kapalı katıya loft eder. Windows gerçek-runner smoke testi `.fl5` ile birlikte STEP başlığını, son kaydını ve dosya boyutunu doğrular.
 
 ## Uyumlu sürüm
 

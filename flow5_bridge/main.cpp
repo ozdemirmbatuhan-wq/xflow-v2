@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -162,6 +164,101 @@ static fs::path saveProject(const QJsonObject &request, const std::string &filen
         throw std::runtime_error("flow5 could not save project: " + log);
     }
     return projectPath;
+}
+
+static void normalizeStepMetreUnit(const fs::path &stepPath)
+{
+    std::ifstream input(stepPath, std::ios::binary);
+    if (!input) throw std::runtime_error("Could not reopen STEP file for unit validation");
+    std::string contents{
+        std::istreambuf_iterator<char>{input},
+        std::istreambuf_iterator<char>{}
+    };
+    input.close();
+    const std::string metre = "SI_UNIT($,.METRE.)";
+    const std::string millimetre = "SI_UNIT(.MILLI.,.METRE.)";
+    bool changed = false;
+    std::size_t position = 0;
+    while ((position = contents.find(millimetre, position)) != std::string::npos) {
+        contents.replace(position, millimetre.size(), metre);
+        position += metre.size();
+        changed = true;
+    }
+    if (contents.find(metre) == std::string::npos) {
+        throw std::runtime_error("STEP writer did not expose a supported metre/millimetre length unit");
+    }
+    if (changed) {
+        std::ofstream output(stepPath, std::ios::binary | std::ios::trunc);
+        if (!output) throw std::runtime_error("Could not normalize STEP length unit to metres");
+        output.write(contents.data(), std::streamsize(contents.size()));
+        if (!output) throw std::runtime_error("Could not finish STEP metre-unit normalization");
+    }
+}
+
+static fs::path saveStepWing(const QJsonObject &request)
+{
+    const QJsonArray sections = request.value("step_sections").toArray();
+    if (sections.size() < 3) {
+        throw std::runtime_error("STEP loft requires at least three wing sections");
+    }
+    const int sectionPointCount = sections.at(0).toArray().size();
+    if (sectionPointCount < 40) {
+        throw std::runtime_error("STEP wing sections require at least 40 contour points");
+    }
+
+    gmsh::model::add("AeroOpt STEP Wing");
+    std::vector<int> wireTags;
+    wireTags.reserve(std::size_t(sections.size()));
+    for (int sectionIndex = 0; sectionIndex < sections.size(); ++sectionIndex) {
+        const QJsonArray section = sections.at(sectionIndex).toArray();
+        if (section.size() != sectionPointCount) {
+            throw std::runtime_error("STEP wing sections must have matched contour sizes");
+        }
+        std::vector<int> pointTags;
+        pointTags.reserve(std::size_t(sectionPointCount + 1));
+        for (int pointIndex = 0; pointIndex < section.size(); ++pointIndex) {
+            const QJsonArray coordinates = section.at(pointIndex).toArray();
+            if (coordinates.size() != 3) {
+                throw std::runtime_error("STEP wing contour point must contain x, y and z");
+            }
+            const double x = coordinates.at(0).toDouble(std::numeric_limits<double>::quiet_NaN());
+            const double y = coordinates.at(1).toDouble(std::numeric_limits<double>::quiet_NaN());
+            const double z = coordinates.at(2).toDouble(std::numeric_limits<double>::quiet_NaN());
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+                throw std::runtime_error("STEP wing contour contains a non-finite coordinate");
+            }
+            pointTags.push_back(gmsh::model::occ::addPoint(x, y, z));
+        }
+        pointTags.push_back(pointTags.front());
+        const int curveTag = gmsh::model::occ::addSpline(pointTags);
+        wireTags.push_back(gmsh::model::occ::addWire({curveTag}, -1, true));
+    }
+
+    std::vector<std::pair<int, int>> loftEntities;
+    gmsh::model::occ::addThruSections(
+        wireTags,
+        loftEntities,
+        -1,
+        true,
+        true
+    );
+    gmsh::model::occ::synchronize();
+    std::vector<std::pair<int, int>> volumes;
+    gmsh::model::getEntities(volumes, 3);
+    if (volumes.empty()) {
+        throw std::runtime_error("OpenCascade STEP loft did not produce a closed solid");
+    }
+
+    gmsh::option::setString("Geometry.OCCSTEPModelName", "AeroOpt optimized wing");
+    gmsh::option::setString("Geometry.OCCSTEPAuthor", "AeroOpt");
+    const fs::path outputDir(stringValue(request, "output_dir"));
+    const fs::path stepPath = outputDir / "aeropt-wing.step";
+    gmsh::write(stepPath.string());
+    normalizeStepMetreUnit(stepPath);
+    if (!fs::is_regular_file(stepPath) || fs::file_size(stepPath) < 256) {
+        throw std::runtime_error("OpenCascade reported success but no usable STEP file was written");
+    }
+    return stepPath;
 }
 
 static QJsonObject runFoil(const QJsonObject &request)
@@ -660,6 +757,9 @@ static QJsonObject runWing(const QJsonObject &request)
     QJsonObject artifacts;
     if (request.value("save_project").toBool(false)) {
         artifacts.insert("project_fl5", QString::fromStdString(saveProject(request, "aeropt-optimized.fl5").string()));
+    }
+    if (request.value("save_step").toBool(false)) {
+        artifacts.insert("wing_step", QString::fromStdString(saveStepWing(request).string()));
     }
     QJsonObject response{
         {"protocol", kProtocol},
