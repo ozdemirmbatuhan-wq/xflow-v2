@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from pathlib import Path
 import sys
 
@@ -81,10 +82,17 @@ def main() -> None:
                 for panel in telemetry["panels"]
             )
             assert "project_fl5" in wing.get("artifact_payloads", {})
+            step_payload = wing.get("artifact_payloads", {}).get("wing_step")
+            assert step_payload
+            step = base64.b64decode(step_payload["base64"])
+            assert step.startswith(b"ISO-10303-21;")
+            assert b"END-ISO-10303-21;" in step
+            assert b"SI_UNIT($,.METRE.)" in step.replace(b" ", b"")
+            assert len(step) > 256
 
     print(
         "Real flow5 7.57 smoke test passed: E818/100 points, VLM2, "
-        "TRIUNIFORM winglet, Cp panel map, spanwise distribution, FL5"
+        "TRIUNIFORM winglet, Cp panel map, spanwise distribution, FL5, STEP solid"
     )
 
 
