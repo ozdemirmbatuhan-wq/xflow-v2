@@ -171,7 +171,6 @@
                 <span class="range-label">Hücum açısı <em>°</em></span>
                 <div class="range-pair"><label>Min<input id="alphaMin" type="number" min="-15" max="25" step="any" value="-2"></label><span>—</span><label>Max<input id="alphaMax" type="number" min="-15" max="25" step="any" value="12"></label></div>
               </div>
-              <div class="field full"><label for="maxBending">Maks. kök momenti <em>N·m · 0 = kapalı</em></label><input id="maxBending" type="number" min="0" step="any" value="0"></div>
               <div class="field full"><label for="airfoilStrategy">Aerodinamik çözüm zinciri</label><select id="airfoilStrategy"><option value="flow5_native" selected>flow5-native · AeroOpt modeli kullanma</option><option value="auto">Legacy otomatik · XFOIL/AeroOpt</option><option value="internal">Legacy yalnız AeroOpt</option><option value="xfoil_closed_loop">Legacy XFOIL kontrolü</option><option value="xfoil_cst_always">Legacy uzun CST + XFOIL</option></select></div>
               <div class="field full"><label for="seed">Tekrarlanabilirlik tohumu</label><input id="seed" type="number" min="0" step="1" value="42"></div>
               <div id="flow5Settings">

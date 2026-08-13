@@ -96,7 +96,6 @@ async function collectRequest() {
       sweep_min_deg: numberValue("sweepMin"), sweep_max_deg: numberValue("sweepMax"),
       tip_twist_min_deg: numberValue("twistMin"), tip_twist_max_deg: numberValue("twistMax"),
       alpha_min_deg: numberValue("alphaMin"), alpha_max_deg: numberValue("alphaMax"),
-      max_root_bending_moment_nm: numberValue("maxBending"),
       multi_section_geometry_enabled: $("multiSectionGeometry").checked,
       mid_chord_factor_min: numberValue("midChordFactorMin"),
       mid_chord_factor_max: numberValue("midChordFactorMax"),
@@ -229,7 +228,7 @@ function applyDefaults(data) {
     sweepMin: data.wing.sweep_min_deg, sweepMax: data.wing.sweep_max_deg,
     twistMin: data.wing.tip_twist_min_deg, twistMax: data.wing.tip_twist_max_deg,
     alphaMin: data.wing.alpha_min_deg, alphaMax: data.wing.alpha_max_deg,
-    maxBending: data.wing.max_root_bending_moment_nm, quality: data.solver.quality,
+    quality: data.solver.quality,
     midChordFactorMin: data.wing.mid_chord_factor_min, midChordFactorMax: data.wing.mid_chord_factor_max,
     midTwistMin: data.wing.mid_twist_min_deg, midTwistMax: data.wing.mid_twist_max_deg,
     wingletHeightMin: data.wing.winglet_height_min_m,
@@ -491,6 +490,23 @@ function metric(label, value, unit) { return `<div class="metric"><small>${escap
 
 function renderComparison(result) {
   const winglet = result.winglet_comparison || {};
+  const policy = result.wing_optimization?.selection_comparison || {};
+  const scalar = policy.scalar_only || {};
+  const feasibility = policy.feasibility_first || {};
+  const policyWing = feasibility.wing || result.wing;
+  const scalarWing = scalar.wing || scalar.coarse_wing;
+  let policyHtml = "";
+  if (scalar.same_as_feasibility_first) {
+    policyHtml = `<div class="solver-help"><b>Fizibilite önceliği olmasaydı da aynı kanat seçilecekti.</b> Skaler toplam amaç ve sert-kısıt önceliği bu aday havuzunda ayrışmadı. Kök momenti seçim koşulu değildir; yalnız telemetridir.</div>`;
+  } else if (scalarWing) {
+    const policyRow = (label, selectedValue, scalarValue, digits=2, unit="") => `<tr><td>${escapeHtml(label)}</td><td class="best">${fmt(selectedValue,digits)} ${unit}</td><td>${fmt(scalarValue,digits)} ${unit}</td></tr>`;
+    const selectedState = feasibility.feasible ? "fizibil" : `ihlal ${fmt(feasibility.constraint_violation,4)}`;
+    const scalarState = scalar.feasible ? "fizibil" : `ihlal ${fmt(scalar.constraint_violation,4)}`;
+    policyHtml = `<div class="solver-help"><b>Fizibilite önceliği seçim karşılaştırması</b> · seçilen: ${escapeHtml(selectedState)} · yalnız skaler amaç: ${escapeHtml(scalarState)}${scalar.available ? "" : " · yüksek çözünürlüklü çıktı üretilemedi"}</div><table class="comparison-table"><thead><tr><th>Gösterge</th><th>Fizibilite öncelikli</th><th>Yalnız skaler amaç</th></tr></thead><tbody>${policyRow("Toplam amaç",feasibility.objective,scalar.objective,6)}${policyRow("Toplam sürükleme",policyWing.drag_n,scalarWing.drag_n,2,"N")}${policyRow("L/D",policyWing.ld,scalarWing.ld,1)}${policyRow("Açıklık",policyWing.geometry.span,scalarWing.geometry.span,3,"m")}${policyRow("Alan",policyWing.geometry.area,scalarWing.geometry.area,3,"m²")}${policyRow("Stall kullanımı",policyWing.stall_ratio,scalarWing.stall_ratio,3)}</tbody></table><div class="solver-help">Kök momenti her iki kanatta da yalnız rapor telemetrisidir; amaç, finalist sırası veya fizibilite kararına girmez.</div>`;
+  } else if (policy.scalar_only) {
+    policyHtml = `<div class="solver-help"><b>Skaler-puan alternatifi teslim edilemedi.</b> ${escapeHtml(scalar.error || "Yüksek çözünürlüklü son çözüm yakınsamadı.")}</div>`;
+  }
+  let primaryHtml;
   if (winglet.performed) {
     const p = winglet.planar, w = winglet.winglet;
     const selected = winglet.selection === "winglet" ? "Winglet seçildi" : "Planar seçildi";
@@ -498,12 +514,13 @@ function renderComparison(result) {
       const delta = Number(withWinglet)-Number(planar);
       return `<tr><td>${label}</td><td class="${winglet.selection==="planar"?"best":""}">${fmt(planar,digits)} ${unit}</td><td class="${winglet.selection==="winglet"?"best":""}">${fmt(withWinglet,digits)} ${unit}</td><td>${delta>=0?"+":""}${fmt(delta,digits)} ${unit}</td></tr>`;
     };
-    $("comparisonTable").innerHTML = `<p class="solver-help"><b>${selected}</b> · aynı izdüşüm açıklığı ve taşıma hedefi · ${escapeHtml(winglet.selection_reason || "kısıtlı amaç karşılaştırması")}</p><table class="comparison-table"><thead><tr><th>Gösterge</th><th>Planar optimum</th><th>Winglet optimum</th><th>Winglet − planar</th></tr></thead><tbody>${row("Toplam sürükleme",p.drag_n,w.drag_n,2,"N")}${row("L/D",p.ld,w.ld,1)}${row("Profil Cᴅ",p.cd_profile,w.cd_profile,5)}${row("İndüklenmiş Cᴅ",p.cd_induced,w.cd_induced,5)}${row("İndüklenmiş pay",p.induced_drag_fraction_percent,w.induced_drag_fraction_percent,1,"%")}${row("Kök eğilme momenti",p.root_bending_moment_nm,w.root_bending_moment_nm,1,"N·m")}</tbody></table>`;
-    return;
+    primaryHtml = `<p class="solver-help"><b>${selected}</b> · aynı izdüşüm açıklığı ve taşıma hedefi · ${escapeHtml(winglet.selection_reason || "kısıtlı amaç karşılaştırması")}</p><table class="comparison-table"><thead><tr><th>Gösterge</th><th>Planar optimum</th><th>Winglet optimum</th><th>Winglet − planar</th></tr></thead><tbody>${row("Toplam sürükleme",p.drag_n,w.drag_n,2,"N")}${row("L/D",p.ld,w.ld,1)}${row("Profil Cᴅ",p.cd_profile,w.cd_profile,5)}${row("İndüklenmiş Cᴅ",p.cd_induced,w.cd_induced,5)}${row("İndüklenmiş pay",p.induced_drag_fraction_percent,w.induced_drag_fraction_percent,1,"%")}${row("Kök eğilme momenti (telemetri)",p.root_bending_moment_nm,w.root_bending_moment_nm,1,"N·m")}</tbody></table>`;
+  } else {
+    const o = result.wing, b = result.rectangular_baseline;
+    const row = (label, optimum, baseline, digits=2, unit="") => `<tr><td>${label}</td><td class="best">${fmt(optimum,digits)} ${unit}</td><td>${fmt(baseline,digits)} ${unit}</td></tr>`;
+    primaryHtml = `<table class="comparison-table"><thead><tr><th>Gösterge</th><th>Optimize</th><th>Dikdörtgen</th></tr></thead><tbody>${row("Toplam sürükleme",o.drag_n,b.drag_n,2,"N")}${row("L/D",o.ld,b.ld,1)}${row("Profil Cᴅ",o.cd_profile,b.cd_profile,4)}${row("İndüklenmiş Cᴅ",o.cd_induced,b.cd_induced,4)}${row("Span verimi",o.span_efficiency,b.span_efficiency,3)}${row("Kök eğilme momenti (telemetri)",o.root_bending_moment_nm,b.root_bending_moment_nm,1,"N·m")}</tbody></table>`;
   }
-  const o = result.wing, b = result.rectangular_baseline;
-  const row = (label, optimum, baseline, digits=2, unit="") => `<tr><td>${label}</td><td class="best">${fmt(optimum,digits)} ${unit}</td><td>${fmt(baseline,digits)} ${unit}</td></tr>`;
-  $("comparisonTable").innerHTML = `<table class="comparison-table"><thead><tr><th>Gösterge</th><th>Optimize</th><th>Dikdörtgen</th></tr></thead><tbody>${row("Toplam sürükleme",o.drag_n,b.drag_n,2,"N")}${row("L/D",o.ld,b.ld,1)}${row("Profil Cᴅ",o.cd_profile,b.cd_profile,4)}${row("İndüklenmiş Cᴅ",o.cd_induced,b.cd_induced,4)}${row("Span verimi",o.span_efficiency,b.span_efficiency,3)}${row("Kök eğilme momenti",o.root_bending_moment_nm,b.root_bending_moment_nm,1,"N·m")}</tbody></table>`;
+  $("comparisonTable").innerHTML = `${primaryHtml}${policyHtml}`;
 }
 
 function downloadLink(filename, contents, type, label) {
@@ -538,6 +555,8 @@ function renderXfoil(result) {
     const spanwise = result.spanwise_airfoil_optimization || {};
     const foilSurrogate = result.airfoil_optimization.surrogate || {};
     const wingSurrogate = result.wing_optimization.surrogate || {};
+    const selectionComparison = result.wing_optimization.selection_comparison || {};
+    const scalarSelection = selectionComparison.scalar_only || {};
     const foilCheckpoint = result.airfoil_optimization.checkpoint || {};
     const wingCheckpoint = result.wing_optimization.checkpoint || {};
     const foilBudget = result.airfoil_optimization.budget_convergence || {};
@@ -554,6 +573,7 @@ function renderXfoil(result) {
       row("Foil optimizeri", result.solver_run.foil_optimizer || "differential_evolution"),
       row("Kanat optimizeri", result.solver_run.wing_optimizer || "differential_evolution"),
       row("Winglet karşılaştırması", winglet.performed ? `${winglet.selection === "winglet" ? "winglet seçildi" : "planar seçildi"} · ΔD %${fmt(winglet.delta_winglet_vs_planar?.drag_percent,2)}` : winglet.enabled ? "aşama tamamlanamadı" : "kapalı"),
+      row("Fizibilite önceliği olmasaydı", scalarSelection.same_as_feasibility_first ? "aynı kanat" : scalarSelection.available ? `${scalarSelection.stage || "ayrı"} alternatif ayrıca verildi` : "alternatif son çözüm üretilemedi"),
       row("Kanat amaçları", multiObjective.enabled ? `${(multiObjective.objective_specs || []).length} amaç · Pareto rank + crowding` : "skaler amaç"),
       row(
         "Bağlı foil–kanat",
@@ -862,7 +882,7 @@ function renderHistory() {
   const a = items.find((item)=>item.id===$("historyA").value) || items[0];
   const b = items.find((item)=>item.id===$("historyB").value) || items[0];
   const row = (label, av, bv, digits=2, unit="") => `<tr><td>${escapeHtml(label)}</td><td class="best">${fmt(av,digits)} ${escapeHtml(unit)}</td><td>${fmt(bv,digits)} ${escapeHtml(unit)}</td><td>${fmt(Number(av)-Number(bv),digits)} ${escapeHtml(unit)}</td></tr>`;
-  $("historyComparison").innerHTML = `<div class="table-scroll"><table class="comparison-table"><thead><tr><th>Gösterge</th><th>Tasarım A</th><th>Tasarım B</th><th>A − B</th></tr></thead><tbody>${row("L/D",a.wing.ld,b.wing.ld,1)}${row("Sürükleme",a.wing.drag_n,b.wing.drag_n,2,"N")}${row("Taşıma",a.wing.lift_n,b.wing.lift_n,1,"N")}${row("Açıklık",a.geometry.span,b.geometry.span,3,"m")}${row("Alan",a.geometry.area,b.geometry.area,3,"m²")}${row("Açıklık oranı",a.geometry.aspect_ratio,b.geometry.aspect_ratio,2)}${row("Taper",a.geometry.taper,b.geometry.taper,3)}${row("Sweep",a.geometry.sweep_deg,b.geometry.sweep_deg,2,"°")}${row("Uç twist",a.geometry.tip_twist_deg,b.geometry.tip_twist_deg,2,"°")}${row("Winglet yüksekliği",a.geometry.winglet_height || 0,b.geometry.winglet_height || 0,3,"m")}${row("Winglet cant",a.geometry.winglet_cant_deg || 90,b.geometry.winglet_cant_deg || 90,1,"°")}${row("Kök momenti",a.wing.root_bending_moment_nm,b.wing.root_bending_moment_nm,1,"N·m")}</tbody></table></div>`;
+  $("historyComparison").innerHTML = `<div class="table-scroll"><table class="comparison-table"><thead><tr><th>Gösterge</th><th>Tasarım A</th><th>Tasarım B</th><th>A − B</th></tr></thead><tbody>${row("L/D",a.wing.ld,b.wing.ld,1)}${row("Sürükleme",a.wing.drag_n,b.wing.drag_n,2,"N")}${row("Taşıma",a.wing.lift_n,b.wing.lift_n,1,"N")}${row("Açıklık",a.geometry.span,b.geometry.span,3,"m")}${row("Alan",a.geometry.area,b.geometry.area,3,"m²")}${row("Açıklık oranı",a.geometry.aspect_ratio,b.geometry.aspect_ratio,2)}${row("Taper",a.geometry.taper,b.geometry.taper,3)}${row("Sweep",a.geometry.sweep_deg,b.geometry.sweep_deg,2,"°")}${row("Uç twist",a.geometry.tip_twist_deg,b.geometry.tip_twist_deg,2,"°")}${row("Winglet yüksekliği",a.geometry.winglet_height || 0,b.geometry.winglet_height || 0,3,"m")}${row("Winglet cant",a.geometry.winglet_cant_deg || 90,b.geometry.winglet_cant_deg || 90,1,"°")}${row("Kök momenti (telemetri)",a.wing.root_bending_moment_nm,b.wing.root_bending_moment_nm,1,"N·m")}</tbody></table></div>`;
 }
 
 function rememberAirfoilResult(result) {
@@ -937,6 +957,13 @@ function renderFoilOnlyResult(result) {
   renderBudgetConvergence(result);
   $("insights").innerHTML = (result.insights || []).map((item) => `<div class="insight ${escapeHtml(item.level)}"><i></i><div><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.text)}</p></div></div>`).join("");
   const ex = result.exports;
+  const scalarEx = ex.scalar_only_alternative || {};
+  const scalarDownloads = !scalarEx.same_as_feasibility_first ? [
+    scalarEx.wing_obj ? downloadLink(scalarEx.wing_obj_filename, scalarEx.wing_obj, "model/obj", "Skaler alternatif · OBJ") : "",
+    scalarEx.wing_step_base64 ? base64DownloadLink(scalarEx.wing_step_filename, scalarEx.wing_step_base64, "model/step", "Skaler alternatif · STEP") : "",
+    scalarEx.results_csv ? downloadLink(scalarEx.results_filename, scalarEx.results_csv, "text/csv", "Skaler alternatif · CSV") : "",
+    scalarEx.flow5_project_base64 ? base64DownloadLink(scalarEx.flow5_project_filename, scalarEx.flow5_project_base64, "application/octet-stream", "Skaler alternatif · FL5") : "",
+  ] : [];
   $("downloads").innerHTML = [
     ex.airfoil_dat ? downloadLink(ex.airfoil_filename, ex.airfoil_dat, "text/plain", "Airfoil · DAT") : "",
     ex.xfoil_polar_csv ? downloadLink(ex.xfoil_polar_filename, ex.xfoil_polar_csv, "text/csv", "flow5/XFoil polar · CSV") : "",
@@ -987,6 +1014,7 @@ function renderResult(result) {
     downloadLink(ex.plane_filename, ex.plane_xml, "application/xml", "Plane · XML"),
     ex.analysis_xml ? downloadLink(ex.analysis_filename, ex.analysis_xml, "application/xml", "Analiz · XML") : "",
     downloadLink(ex.wing_obj_filename, ex.wing_obj, "model/obj", "3B kanat · OBJ"),
+    ex.wing_step_base64 ? base64DownloadLink(ex.wing_step_filename, ex.wing_step_base64, "model/step", "3B CAD · STEP") : "",
     downloadLink(ex.results_filename, ex.results_csv, "text/csv", "Sonuçlar · CSV"),
     downloadLink(ex.project_filename, ex.project_json, "application/json", "Proje · JSON"),
     ex.xfoil_polar_csv ? downloadLink(ex.xfoil_polar_filename, ex.xfoil_polar_csv, "text/csv", result.flow5_native ? "flow5/XFoil polar · CSV" : "XFOIL polar · CSV") : "",
@@ -996,6 +1024,7 @@ function renderResult(result) {
     ex.diagnostics_json ? downloadLink(ex.diagnostics_filename, ex.diagnostics_json, "application/json", "Teşhis · JSON") : "",
     ex.cavitation_json ? downloadLink(ex.cavitation_filename, ex.cavitation_json, "application/json", "Kavitasyon haritası · JSON") : "",
     ex.flow5_project_base64 ? base64DownloadLink(ex.flow5_project_filename, ex.flow5_project_base64, "application/octet-stream", "Çözümlenmiş flow5 · FL5") : "",
+    ...scalarDownloads,
     ...(ex.section_airfoils || []).map((item) => downloadLink(item.filename, item.airfoil_dat, "text/plain", `${item.station} airfoil · DAT`)),
     base64DownloadLink(ex.flow5_bundle_filename, ex.flow5_bundle_base64, "application/zip", "Tüm flow5 paketi · ZIP"),
   ].filter(Boolean).join("");
