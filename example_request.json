@@ -36,7 +36,6 @@
     "tip_twist_max_deg": 0.0,
     "alpha_min_deg": -2.0,
     "alpha_max_deg": 12.0,
-    "max_root_bending_moment_nm": 0.0,
     "multi_section_geometry_enabled": true,
     "mid_chord_factor_min": 0.85,
     "mid_chord_factor_max": 1.15,

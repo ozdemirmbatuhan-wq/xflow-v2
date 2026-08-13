@@ -11,11 +11,11 @@ AeroOpt, Eppler E818 veya kullanıcının verdiği bir DAT profiliyle başlar; s
 5. Kanat açıklığı, kök chord, taper, çeyrek-chord sweep, uç twist; istenirse orta-istasyon chord ve twist değişkenleri optimize edilir. Winglet tasarımı açılırsa önce planar optimum, ardından aynı izdüşümsel span/hedef taşımada yükseklik–cant–toe–taper winglet aşaması çözülür ve iki tasarım doğrudan karşılaştırılır.
 6. Arama ağı ve final ağı sonrasında daha ince üçüncü ağla CD/hedef-Cl alfa yakınsaması kontrol edilir. Yakınsamayan, `out_of_mesh` olan veya viskoz çözümü başarısız noktalar uygun kabul edilmez.
 7. İstenirse kök–orta–uç profilleri yerel Reynolds/Cl koşullarında ayrı ayrı optimize edilir ve üç profilli kanat yeniden çözülür.
-8. Varsayılan kanat optimizeri gerçek NSGA-II'dir. Sürükleme, kök momenti ve stall kullanımı; yapısal denetim açıksa ayrıca kütle/yapısal kullanım, Pareto rütbesi ve crowding-distance ile birlikte optimize edilir.
+8. Varsayılan kanat optimizeri gerçek NSGA-II'dir. Sürükleme ve stall kullanımı; yapısal denetim açıksa ayrıca kütle/yapısal kullanım, Pareto rütbesi ve crowding-distance ile birlikte optimize edilir. Kök eğilme momenti yalnız telemetridir; amaç, kısıt veya fizibilite koşulu değildir.
 9. Profil ve kanat başlangıç bütçeleri, amaç/Pareto hareketi tolerans dışındaysa örneğin `48 → 96 → 192` biçiminde otomatik büyür. Yakınsama sağlanırsa kullanılmayan bütçe harcanmaz; azami bütçede hareket sürerse sonuç bütçe-sınırlı işaretlenir.
 10. Su taraması açıksa arama adaylarında hızlı `Cp_min` kısıtı kullanılır; seçilen yüksek çözünürlüklü finalistte gerçek flow5 panel köşeleri ve Cp değerleri ayrıca alınarak 3B risk haritası, riskli alan, açıklık dağılımı ve hız/derinlik duyarlılığı hesaplanır.
 11. Solver kimliği, 100-nokta sözleşmesi, kuvvet/CD kapanışı, mesh, telemetri ve fiziksel makullük kontrolleri otomatik doğrulama raporuna yazılır.
-12. Sonuçlar DAT, XML, OBJ, CSV, doğrulama/Pareto/teşhis/kavitasyon JSON'ları, ZIP ve yalnızca flow5 gerçekten kaydettiyse `.fl5` olarak dışa aktarılır.
+12. Sonuçlar DAT, XML, OBJ, kapalı-katı STEP, CSV, doğrulama/Pareto/teşhis/kavitasyon JSON'ları, ZIP ve yalnızca flow5 gerçekten kaydettiyse `.fl5` olarak dışa aktarılır. Fizibilite önceliği olmadan skaler puanın seçeceği kanat farklıysa onun OBJ/STEP/CSV/FL5 dosyaları da ayrıca verilir.
 
 Uzun işlemler arka planda yürür. Arayüz gerçek aşama/aday/seed ilerlemesini gösterir ve işi iptal edebilir. İki ayrı devam katmanı vardır: SHA-256 değerlendirme önbelleği tamamlanmış flow5 yanıtlarını, optimizer checkpoint'i ise DE veya NSGA-II popülasyonunu, nesli, değerlendirme geçmişini, bütçe denetleyicisini, RNG durumunu ve varsa surrogate örneklerini atomik JSON olarak saklar. Checkpoint nesil sınırlarında alınır; neslin ortasında iptal edilirse son tamamlanmış nesilden devam edilir. Başarıyla biten problem checkpoint'i temizlenir.
 
@@ -29,7 +29,7 @@ Uzun işlemler arka planda yürür. Arayüz gerçek aşama/aday/seed ilerlemesin
 | Optimizer checkpoint | Açık | Popülasyon + RNG + surrogate durumunu problem parmak iziyle saklar; aynı ayarlarla yeniden başlatınca geri yükler |
 | Multi-seed | 1 koşu | Arayüzden 3 veya 5 bağımsız seed seçilebilir; en iyi fizibil koşu seçilir, amaç/geometri CV raporlanır |
 | Pareto analizi | Açık | NSGA-II seçilince cephe optimizer tarafından üretilir; DE/adaptive seçilince gerçek çözücü adaylarından sonradan çıkarılır |
-| Winglet tasarımı | Kapalı | Planar optimumdan sonra dört-kesitli yüksek-dihedral flow5 geometrisinde yükseklik, cant, toe ve taper aranır; drag, indüklenmiş CD, L/D ve kök moment farkları raporlanır |
+| Winglet tasarımı | Kapalı | Planar optimumdan sonra dört-kesitli yüksek-dihedral flow5 geometrisinde yükseklik, cant, toe ve taper aranır; drag, indüklenmiş CD, L/D ve yalnız telemetri olarak kök moment farkları raporlanır |
 | Doğrulama/regresyon | Açık | Dokuz tutarlılık/makullük kontrolü ve tekrarlanabilir SHA-256 sonuç imzası üretir |
 | Otomatik teşhis | Açık | Stall, Reynolds, drag bileşeni, mesh, solver noktası, sınır, coupling, seed, yapı ve kavitasyon kanıtlarını kurallarla sıralar |
 | Proje geçmişi | Açık | Son 12 tasarım özetini tarayıcı yerel depolamasında tutar ve iki tasarımı yan yana karşılaştırır |
@@ -56,7 +56,7 @@ Depoyu GitHub'a yükledikten sonra yerel bilgisayara Python, Qt, Visual Studio, 
 3. İş bitince `AeroOpt-0.8.0-Windows-flow5` artifact'ini indirin.
 4. ZIP'i tamamen çıkarıp `AeroOpt.exe` dosyasını çalıştırın.
 
-İş akışı Python testlerini çalıştırır; sabitlenmiş flow5 kaynaklarını ve C++ runner'ı derler; gerçek E818/100-nokta profil, VLM2, TRIUNIFORM winglet, panel Cp haritası, telemetri ve `.fl5` smoke testlerini geçmeden paketi yayımlamaz.
+İş akışı Python testlerini çalıştırır; sabitlenmiş flow5 kaynaklarını ve C++ runner'ı derler; gerçek E818/100-nokta profil, VLM2, TRIUNIFORM winglet, panel Cp haritası, telemetri, `.fl5` ve OpenCascade STEP-katısı smoke testlerini geçmeden paketi yayımlamaz.
 
 Paket içindeki uygulamada **flow5 runner yolu** boş bırakılır. Arayüz `aeropt-flow5-runner.exe` dosyasını otomatik bulur. `flow5.exe`, `flow5-runner.exe` veya `fake_flow5_runner.exe` bu alan için uygun değildir.
 
@@ -137,10 +137,11 @@ Tek bir flow5 adayının zaman aşımı arayüzden en çok **21.600 s (6 saat)**
 - Üç geometri istasyonu vardır: kök, yarı-açıklığın ortası ve uç.
 - Orta chord/twist bağımsız değişkenleri kapatılırsa orta istasyon kök–uç arasında doğrusal enterpolasyon olur.
 - Arama varsayılan VLM2, finalist çözümü TRIUNIFORM'dur.
-- Varsayılan optimizer NSGA-II'dir. Fizibil olmayan adaylar toplam kısıt ihlaline göre; fizibil adaylar sürükleme–moment–stall ve etkinleştirilen mühendislik amaçlarının Pareto rütbesi/crowding mesafesine göre seçilir.
-- Final doğrulamasına skaler uzlaşma adayı ile Pareto cephesinin seyrek bölgelerinden temsilciler birlikte gönderilir; tek teslim tasarımı ince mesh finalistleri arasındaki en iyi skaler uzlaşmadır.
+- Varsayılan optimizer NSGA-II'dir. Fizibil olmayan adaylar toplam kısıt ihlaline göre; fizibil adaylar sürükleme–stall ve etkinleştirilen mühendislik amaçlarının Pareto rütbesi/crowding mesafesine göre seçilir. Kök eğilme momenti bu sıralamaların hiçbirine girmez.
+- Final doğrulamasına fizibilite-öncelikli uzlaşma adayı ile Pareto cephesinin seyrek bölgelerinden temsilciler gönderilir. Final teslimi önce en düşük sert-kısıt ihlaline, eşitlikte en düşük skaler toplam amaca göre seçilir.
+- Aynı arama havuzundaki en düşük skaler amaçlı aday finalist kotasını tüketmeden ayrıca korunur. Fizibilite önceliği kullanılmadan seçilecek bu kanat final ağında yeniden çözülür; ana kanattan farklıysa performans/geometri karşılaştırması ile ayrı OBJ, kapalı-katı STEP, CSV ve `.fl5` dosyaları üretilir.
 - Viskoz profil drag'i gömülü XFoil'den; 3B/indüklenmiş bileşen ve spanwise dağılım flow5 çalışma noktalarından gelir.
-- İnce ağdaki sonuç final `.fl5` projesine yazılır. Eş alanlı dikdörtgen baseline aynı final yöntem/ağ ile karşılaştırılır.
+- İnce ağdaki sonuç final `.fl5` projesine ve metre birimli OpenCascade STEP katısına yazılır. Eş alanlı dikdörtgen baseline aynı final yöntem/ağ ile karşılaştırılır.
 - Winglet seçeneği planar aramayı kaldırmaz. Planar optimum tamamlandıktan sonra ana planform sabitlenir; toplam izdüşümsel span korunarak ana kanat yarı-açıklığı winglet yatay izdüşümü kadar kısaltılır ve dördüncü yüksek-dihedral kesitte yalnız yükseklik, cant, toe ve taper optimize edilir. Son karar fizibiliteyi önceleyip aynı planform/hedef taşıma koşulundaki kısıtlı toplam amacı karşılaştırır.
 
 ### Kavitasyon haritası ve etki göstergeleri
