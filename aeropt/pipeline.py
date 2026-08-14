@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from .airfoil import generate_polar, naca4_coordinates
+from .airfoil import generate_polar, naca4_coordinates, naca4_design
 from .baselines import build_baseline_profile
 from .convergence import BudgetEscalationSettings
 from .exporters import (
@@ -82,6 +82,7 @@ DEFAULT_REQUEST: dict[str, Any] = {
         "mid_twist_min_deg": -4.0,
         "mid_twist_max_deg": 1.0,
         "winglet_optimization_enabled": False,
+        "winglet_naca_code": "0012",
         "winglet_height_min_m": 0.05,
         "winglet_height_max_m": 0.40,
         "winglet_cant_min_deg": 60.0,
@@ -524,6 +525,13 @@ def run_design(
     winglet_optimization_enabled = _boolean(
         wing_cfg, "winglet_optimization_enabled"
     )
+    raw_winglet_naca_code = str(wing_cfg.get("winglet_naca_code", "0012"))
+    try:
+        winglet_naca_code = naca4_design(
+            raw_winglet_naca_code if winglet_optimization_enabled else "0012"
+        ).name.removeprefix("NACA")
+    except ValueError as exc:
+        raise InputError(str(exc)) from exc
     winglet_height_bounds = _bounds(
         wing_cfg,
         "winglet_height_min_m",
@@ -952,6 +960,7 @@ def run_design(
             mid_chord_factor_bounds=mid_chord_factor_bounds,
             mid_twist_bounds=mid_twist_bounds,
             winglet_optimization_enabled=winglet_optimization_enabled,
+            winglet_naca_code=winglet_naca_code,
             winglet_candidate_budget=flow5_winglet_budget,
             winglet_height_bounds=winglet_height_bounds,
             winglet_cant_bounds=winglet_cant_bounds,

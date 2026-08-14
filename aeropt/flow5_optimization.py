@@ -16,7 +16,7 @@ from .convergence import BudgetEscalationController, BudgetEscalationSettings
 from .exporters import airfoil_dat
 from .flow5 import Flow5CancelledError, Flow5Mesh, Flow5Runner
 from .hydro import HydroSettings, analyze_hydro
-from .models import AirfoilDesign, CSTAirfoilDesign, Fluid, WingGeometry
+from .models import AirfoilDesign, AirfoilLike, CSTAirfoilDesign, Fluid, WingGeometry
 from .structures import StructuralSettings, analyze_structure
 from .surrogate import RBFSurrogateAdvisor, SurrogateSettings
 
@@ -1612,8 +1612,8 @@ def optimize_wing_with_flow5(
     winglet_cant_bounds: tuple[float, float] = (60.0, 90.0),
     winglet_toe_bounds: tuple[float, float] = (-3.0, 3.0),
     winglet_taper_bounds: tuple[float, float] = (0.30, 1.0),
-    section_foils: tuple[CSTAirfoilDesign, CSTAirfoilDesign, CSTAirfoilDesign] | None = None,
-    section_foil_dat_texts: tuple[str, str, str] | None = None,
+    section_foils: tuple[AirfoilLike, ...] | None = None,
+    section_foil_dat_texts: tuple[str, ...] | None = None,
     structural_settings: StructuralSettings = StructuralSettings(),
     hydro_settings: HydroSettings = HydroSettings(),
     initial_geometry: WingGeometry | None = None,
@@ -2572,7 +2572,7 @@ def optimize_wing_with_flow5(
             "toe_deg": list(winglet_toe_bounds),
             "taper": list(winglet_taper_bounds),
         },
-        "spanwise_airfoil_count": 3 if section_foils is not None else 1,
+        "spanwise_airfoil_count": len(section_foils) if section_foils is not None else 1,
         "spanwise_airfoil_names": (
             [section_foil.name for section_foil in section_foils]
             if section_foils is not None

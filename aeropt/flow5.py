@@ -13,7 +13,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from .exporters import airfoil_dat, flow5_plane_xml, wing_step_sections
 from .models import AirfoilLike, Fluid, WingGeometry
@@ -576,8 +576,8 @@ class Flow5Runner:
         panel_telemetry_target_lift_n: float | None = None,
         thin_surfaces: bool = True,
         mesh: Flow5Mesh | None = None,
-        section_foils: tuple[AirfoilLike, AirfoilLike, AirfoilLike] | None = None,
-        section_foil_dat_texts: tuple[str, str, str] | None = None,
+        section_foils: Sequence[AirfoilLike] | None = None,
+        section_foil_dat_texts: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         method = method.upper()
         if method not in {"LLT", "VLM1", "VLM2", "QUADS", "TRIUNIFORM", "TRILINEAR"}:
@@ -587,6 +587,17 @@ class Flow5Runner:
             raise Flow5RunnerError(
                 "Kesit profilleri ve DAT metinleri birlikte verilmelidir"
             )
+        if section_foils is not None and section_foil_dat_texts is not None:
+            if len(section_foils) not in {3, 4}:
+                raise Flow5RunnerError("Kanat çözümü üç veya dört kesit profili kabul eder")
+            if len(section_foils) != len(section_foil_dat_texts):
+                raise Flow5RunnerError("Kesit profili ve DAT sayıları eşit olmalıdır")
+            if len(section_foils) == 4 and not geometry.winglet_active:
+                # Winglet optimization also evaluates a planar rectangular
+                # reference.  Its unused fourth NACA section must not leak
+                # into that three-section plane definition.
+                section_foils = tuple(section_foils[:3])
+                section_foil_dat_texts = tuple(section_foil_dat_texts[:3])
         if panel_telemetry and (
             panel_telemetry_target_lift_n is None
             or not math.isfinite(float(panel_telemetry_target_lift_n))
@@ -598,7 +609,9 @@ class Flow5Runner:
         wing_files: dict[str, str]
         section_request: list[dict[str, str]] | None = None
         if section_foils is not None and section_foil_dat_texts is not None:
-            keys = ("foil_root.dat", "foil_mid.dat", "foil_tip.dat")
+            keys = ("foil_root.dat", "foil_mid.dat", "foil_tip.dat", "foil_winglet.dat")[
+                : len(section_foils)
+            ]
             wing_files = {
                 key: dat_text
                 for key, dat_text in zip(keys, section_foil_dat_texts)

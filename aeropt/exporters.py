@@ -5,6 +5,7 @@ import io
 import json
 import zipfile
 from math import cos, radians, sin
+from typing import Sequence
 from xml.dom import minidom
 from xml.etree import ElementTree as ET
 
@@ -38,13 +39,23 @@ def _allocate_span_panels(lengths: tuple[float, ...], total: int) -> tuple[int, 
     return tuple(int(value) for value in extra + 2)
 
 
+def _section_foil_tuple(
+    foil: AirfoilLike,
+    section_foils: Sequence[AirfoilLike] | None,
+) -> tuple[AirfoilLike, ...]:
+    foils = tuple(section_foils) if section_foils is not None else (foil, foil, foil)
+    if len(foils) not in {3, 4}:
+        raise ValueError("Kanat için üç ana kesit ve isteğe bağlı bir winglet kesiti gerekli")
+    return foils
+
+
 def flow5_plane_xml(
     foil: AirfoilLike,
     wing: WingGeometry,
     *,
     chordwise_panels: int = 14,
     half_span_panels: int = 18,
-    section_foils: tuple[AirfoilLike, AirfoilLike, AirfoilLike] | None = None,
+    section_foils: Sequence[AirfoilLike] | None = None,
 ) -> str:
     """Create a flow5 plane XML with an optional high-dihedral winglet strip."""
     if not 4 <= int(chordwise_panels) <= 200:
@@ -77,7 +88,7 @@ def flow5_plane_xml(
     ET.SubElement(wing_node, "symmetric").text = "true"
     ET.SubElement(wing_node, "Two_Sided").text = "true"
     sections = ET.SubElement(wing_node, "Sections")
-    foils = section_foils or (foil, foil, foil)
+    foils = _section_foil_tuple(foil, section_foils)
     if wing.winglet_active:
         if not wing.winglet_geometry_valid:
             raise ValueError("Winglet yatay izdüşümü ana yarı açıklığı tüketiyor")
@@ -89,6 +100,7 @@ def flow5_plane_xml(
             ),
             int(half_span_panels),
         )
+        winglet_foil = foils[3] if len(foils) == 4 else foils[2]
         section_data = (
             (0.0, wing.root_chord, 0.0, 0.0, 0.0, strip_panels[0], foils[0].name),
             (
@@ -107,7 +119,7 @@ def flow5_plane_xml(
                 wing.winglet_cant_deg,
                 wing.tip_twist_deg,
                 strip_panels[2],
-                foils[2].name,
+                winglet_foil.name,
             ),
             (
                 wing.main_semispan + wing.winglet_developed_length,
@@ -116,7 +128,7 @@ def flow5_plane_xml(
                 0.0,
                 wing.winglet_tip_twist_deg,
                 0,
-                foils[2].name,
+                winglet_foil.name,
             ),
         )
     else:
@@ -359,9 +371,9 @@ def _wing_foil_contours(
     foil: AirfoilLike,
     *,
     points_per_side: int = 81,
-    section_foils: tuple[AirfoilLike, AirfoilLike, AirfoilLike] | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    foil_sections = section_foils or (foil, foil, foil)
+    section_foils: Sequence[AirfoilLike] | None = None,
+) -> tuple[np.ndarray, ...]:
+    foil_sections = _section_foil_tuple(foil, section_foils)
     contours: list[np.ndarray] = []
     for section_foil in foil_sections:
         contour_x, contour_z = naca4_coordinates(section_foil, points_per_side)
@@ -371,12 +383,12 @@ def _wing_foil_contours(
         contours.append(np.column_stack((contour_x, contour_z)))
     if len({len(contour) for contour in contours}) != 1:
         raise ValueError("Kanat kesit profilleri aynı koordinat sayısını kullanmalı")
-    return contours[0], contours[1], contours[2]
+    return tuple(contours)
 
 
 def _wing_station_points(
     wing: WingGeometry,
-    contours: tuple[np.ndarray, np.ndarray, np.ndarray],
+    contours: tuple[np.ndarray, ...],
     *,
     side: int,
     kind: str,
@@ -397,7 +409,8 @@ def _wing_station_points(
             blend = (fraction - wing.mid_span_fraction) / max(
                 1.0 - wing.mid_span_fraction, 1.0e-12
             )
-            first, second = contours[1], contours[2]
+            first = contours[1]
+            second = contours[3] if wing.winglet_active and len(contours) == 4 else contours[2]
         contour = (1.0 - blend) * first + blend * second
     elif kind == "winglet":
         cant = radians(wing.winglet_cant_deg)
@@ -413,7 +426,7 @@ def _wing_station_points(
         z_center = distance * sin(cant)
         normal_y = -side * sin(cant)
         normal_z = cos(cant)
-        contour = contours[2]
+        contour = contours[3] if len(contours) == 4 else contours[2]
     else:
         raise ValueError(f"Bilinmeyen kanat kesiti: {kind}")
 
@@ -435,7 +448,7 @@ def wing_step_sections(
     wing: WingGeometry,
     *,
     points_per_side: int = 81,
-    section_foils: tuple[AirfoilLike, AirfoilLike, AirfoilLike] | None = None,
+    section_foils: Sequence[AirfoilLike] | None = None,
 ) -> list[list[list[float]]]:
     """Return matched closed section contours for an OpenCascade STEP loft."""
     contours = _wing_foil_contours(
@@ -469,7 +482,7 @@ def wing_obj(
     *,
     span_sections: int = 25,
     points_per_side: int = 81,
-    section_foils: tuple[AirfoilLike, AirfoilLike, AirfoilLike] | None = None,
+    section_foils: Sequence[AirfoilLike] | None = None,
 ) -> str:
     """Create a connected 3D mesh of the planar wing and optional winglets."""
     if span_sections < 3:
@@ -555,7 +568,7 @@ def flow5_bundle_bytes(
     analysis_xml_text: str | None = None,
     flow5_project_bytes: bytes | None = None,
     wing_step_bytes: bytes | None = None,
-    section_foil_dat_texts: tuple[str, str, str] | None = None,
+    section_foil_dat_texts: Sequence[str] | None = None,
     scalar_only_wing_obj_text: str | None = None,
     scalar_only_wing_step_bytes: bytes | None = None,
     scalar_only_results_csv_text: str | None = None,
@@ -604,7 +617,10 @@ Kaynak etiketi flow5 olan sayılar AeroOpt korelasyonundan değil flow5 API çı
         archive.writestr("README-flow5.txt", guide)
         archive.writestr("aeropt-airfoil.dat", foil_dat_text)
         if section_foil_dat_texts is not None:
-            for station, text in zip(("root", "mid", "tip"), section_foil_dat_texts):
+            station_names = ("root", "mid", "tip", "winglet")
+            if len(section_foil_dat_texts) not in {3, 4}:
+                raise ValueError("Paket için üç veya dört kesit DAT metni gerekli")
+            for station, text in zip(station_names, section_foil_dat_texts):
                 archive.writestr(f"aeropt-airfoil-{station}.dat", text)
         archive.writestr("aeropt-wing.xml", plane_xml_text)
         archive.writestr("aeropt-wing.obj", wing_obj_text)

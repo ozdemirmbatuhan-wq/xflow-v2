@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from .airfoil import airfoil_coordinates
+from .airfoil import airfoil_coordinates, naca4_design
 from .baselines import BaselineProfile, build_derived_baseline_profile
 from .checkpoint import OptimizerCheckpointStore, optimizer_fingerprint
 from .convergence import BudgetEscalationSettings
@@ -31,7 +31,7 @@ from .flow5_optimization import (
     optimize_wing_with_flow5,
 )
 from .hydro import HydroSettings
-from .models import CSTAirfoilDesign, Fluid, WingGeometry
+from .models import AirfoilLike, CSTAirfoilDesign, Fluid, WingGeometry
 from .structures import StructuralSettings
 from .surrogate import SurrogateSettings
 from .validation import ValidationSettings
@@ -74,6 +74,7 @@ class Flow5NativeSettings:
     mid_chord_factor_bounds: tuple[float, float]
     mid_twist_bounds: tuple[float, float]
     winglet_optimization_enabled: bool
+    winglet_naca_code: str
     winglet_candidate_budget: int
     winglet_height_bounds: tuple[float, float]
     winglet_cant_bounds: tuple[float, float]
@@ -525,34 +526,27 @@ def run_flow5_native_design(
     effective_spanwise_optimization = bool(
         settings.spanwise_airfoil_optimization_enabled and workflow_mode == "coupled"
     )
-    if settings.winglet_optimization_enabled:
-        stage_ranges = {
-            "foil_search": (0.01, 0.27),
-            "foil_budget": (0.01, 0.27),
-            "foil_final": (0.27, 0.34),
-            "wing_search": (0.34, 0.52),
-            "wing_budget": (0.34, 0.52),
-            "wing_final": (0.52, 0.59),
-            "mesh_convergence": (0.59, 0.66),
-            "winglet_search": (0.66, 0.84),
-            "winglet_budget": (0.66, 0.84),
-            "winglet_final": (0.84, 0.91),
-            "winglet_convergence": (0.91, 0.98),
-        }
-    else:
-        stage_ranges = {
-            "foil_search": (0.01, 0.35),
-            "foil_budget": (0.01, 0.35),
-            "foil_final": (0.35, 0.45),
-            "wing_search": (0.45, 0.75),
-            "wing_budget": (0.45, 0.75),
-            "wing_final": (0.75, 0.87),
-            "mesh_convergence": (0.87, 0.97),
-        }
+    # Each coupled pass is strictly planar.  The optional winglet search gets
+    # its own final pass after coupling and spanwise-profile refinement.
+    stage_ranges = {
+        "foil_search": (0.01, 0.35),
+        "foil_budget": (0.01, 0.35),
+        "foil_final": (0.35, 0.45),
+        "wing_search": (0.45, 0.75),
+        "wing_budget": (0.45, 0.75),
+        "wing_final": (0.75, 0.87),
+        "mesh_convergence": (0.87, 0.97),
+        "winglet_search": (0.01, 0.62),
+        "winglet_budget": (0.01, 0.62),
+        "winglet_final": (0.62, 0.82),
+        "winglet_convergence": (0.82, 0.97),
+    }
 
     active_iteration = 0
-    progress_passes = effective_coupled_iterations + int(
-        effective_spanwise_optimization
+    progress_passes = (
+        effective_coupled_iterations
+        + int(effective_spanwise_optimization)
+        + int(settings.winglet_optimization_enabled)
     )
     last_reported_percent = 0.0
 
@@ -614,7 +608,7 @@ def run_flow5_native_design(
         checkpoint_runner_identity = {"path": str(runner.path)}
 
     checkpoint_contract = {
-        "contract": 5,
+        "contract": 6,
         "flow5_api_version": "7.57",
         "seed": settings.seed,
         "fluid": fluid.to_dict(),
@@ -639,6 +633,8 @@ def run_flow5_native_design(
             "mid_chord_factor": settings.mid_chord_factor_bounds,
             "mid_twist": settings.mid_twist_bounds,
             "winglet_enabled": settings.winglet_optimization_enabled,
+            "winglet_naca_code": settings.winglet_naca_code,
+            "winglet_execution_policy": "post_coupling_once",
             "winglet_height": settings.winglet_height_bounds,
             "winglet_cant": settings.winglet_cant_bounds,
             "winglet_toe": settings.winglet_toe_bounds,
@@ -667,7 +663,7 @@ def run_flow5_native_design(
 
     def checkpoint_key(label: str, payload: dict[str, Any]) -> str:
         return optimizer_fingerprint(
-            f"flow5-native-v5:{label}",
+            f"flow5-native-v6:{label}",
             {
                 "problem": checkpoint_contract,
                 "payload": payload,
@@ -793,7 +789,7 @@ def run_flow5_native_design(
         response = wing_response.get("_scalar_only_alternative_response")
         return scalar, response if isinstance(response, dict) else None
 
-    def optimize_wing_pair(
+    def optimize_wing_stage(
         *,
         foil: CSTAirfoilDesign,
         foil_dat_text: str,
@@ -801,11 +797,15 @@ def run_flow5_native_design(
         checkpoint_label: str,
         checkpoint_payload: dict[str, Any],
         initial_geometry: WingGeometry | None = None,
-        section_foils: tuple[
-            CSTAirfoilDesign, CSTAirfoilDesign, CSTAirfoilDesign
+        section_foils: tuple[AirfoilLike, ...] | None = None,
+        section_foil_dat_texts: tuple[str, ...] | None = None,
+        run_winglet: bool = False,
+        fixed_planar: tuple[
+            dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]
         ]
         | None = None,
-        section_foil_dat_texts: tuple[str, str, str] | None = None,
+        winglet_section_foils: tuple[AirfoilLike, ...] | None = None,
+        winglet_section_foil_dat_texts: tuple[str, ...] | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
         common = {
             "runner": runner,
@@ -850,28 +850,43 @@ def run_flow5_native_design(
             "budget_escalation_settings": settings.budget_escalation_settings,
             "checkpoint_store": checkpoint_store,
         }
-        planar_wing, planar_baseline, planar_meta, planar_response = (
-            optimize_wing_with_flow5(
-                **common,
-                candidate_budget=settings.wing_candidate_budget,
-                seed=seed,
-                progress_callback=report,
-                initial_geometry=planar_copy(initial_geometry),
-                winglet_optimization_enabled=False,
-                checkpoint_key=checkpoint_key(
-                    f"{checkpoint_label}-planar",
-                    {**checkpoint_payload, "stage": "planar"},
-                ),
+        if fixed_planar is None:
+            planar_wing, planar_baseline, planar_meta, planar_response = (
+                optimize_wing_with_flow5(
+                    **common,
+                    candidate_budget=settings.wing_candidate_budget,
+                    seed=seed,
+                    progress_callback=report,
+                    initial_geometry=planar_copy(initial_geometry),
+                    winglet_optimization_enabled=False,
+                    checkpoint_key=checkpoint_key(
+                        f"{checkpoint_label}-planar",
+                        {**checkpoint_payload, "stage": "planar"},
+                    ),
+                )
             )
-        )
-        if not settings.winglet_optimization_enabled:
+        else:
+            planar_wing, planar_baseline, planar_meta, planar_response = fixed_planar
+        if not run_winglet:
             planar_meta["winglet_comparison"] = {
-                "enabled": False,
+                "enabled": settings.winglet_optimization_enabled,
                 "performed": False,
                 "selected": False,
                 "selection": "planar",
+                "reason": (
+                    "deferred_until_post_coupling"
+                    if settings.winglet_optimization_enabled
+                    else "disabled_by_user"
+                ),
+                "execution_policy": "post_coupling_once",
+                "included_in_coupled_loop": False,
             }
             return planar_wing, planar_baseline, planar_meta, planar_response
+
+        if not settings.winglet_optimization_enabled:
+            raise RuntimeError("Kapalı winglet aşaması çalıştırılamaz")
+        if winglet_section_foils is None or winglet_section_foil_dat_texts is None:
+            raise RuntimeError("Winglet aşaması için NACA kesiti ve DAT metni gerekli")
 
         planar_geometry = geometry_from_result(planar_wing)
         seed_winglet = (
@@ -915,6 +930,8 @@ def run_flow5_native_design(
         # same-planform, same-projected-span, same-target-lift comparison.
         winglet_common = {
             **common,
+            "section_foils": winglet_section_foils,
+            "section_foil_dat_texts": winglet_section_foil_dat_texts,
             "span_bounds": (planar_geometry.span, planar_geometry.span),
             "root_chord_bounds": (
                 planar_geometry.root_chord,
@@ -986,6 +1003,11 @@ def run_flow5_native_design(
                 "reason": "winglet_stage_failed",
                 "error": str(exc)[-800:],
                 "planar": winglet_summary(planar_wing, planar_meta),
+                "airfoil": winglet_section_foils[-1].to_dict(),
+                "airfoil_name": winglet_section_foils[-1].name,
+                "execution_policy": "post_coupling_once",
+                "execution_count": 1,
+                "included_in_coupled_loop": False,
                 "model": "flow5 high-dihedral fourth section",
             }
             planar_meta["winglet_comparison"] = comparison
@@ -1023,6 +1045,12 @@ def run_flow5_native_design(
             "same_projected_span_and_target_lift": True,
             "frozen_planar_geometry": True,
             "optimized_variables": ["height", "cant", "toe", "taper"],
+            "airfoil": winglet_section_foils[-1].to_dict(),
+            "airfoil_name": winglet_section_foils[-1].name,
+            "airfoil_policy": "user-selected fixed NACA 4-digit section",
+            "execution_policy": "post_coupling_once",
+            "execution_count": 1,
+            "included_in_coupled_loop": False,
             "planar": planar_summary,
             "winglet": winglet_result_summary,
             "delta_winglet_vs_planar": {
@@ -1073,13 +1101,13 @@ def run_flow5_native_design(
             and same_wing_geometry(selected_wing, scalar_wing)
         )
         overall_scalar["same_as_feasibility_first"] = same_as_selected
-        overall_scalar["selection_scope"] = "planar ve winglet aşamalarının tamamı"
+        overall_scalar["selection_scope"] = "planar sonuç ve tek son işlem winglet aşaması"
         selected_comparison = deepcopy(
             selected_meta.get("selection_comparison", {})
         )
         selected_comparison["scalar_only"] = overall_scalar
         selected_comparison["definition"] = (
-            "Planar ve winglet aşamalarının tümünde fizibilite-öncelikli sonuç ile "
+            "Planar sonuç ve tek son işlem winglet aşamasında fizibilite-öncelikli sonuç ile "
             "yalnız skaler toplam amacın seçeceği sonuç"
         )
         selected_meta["selection_comparison"] = selected_comparison
@@ -1377,7 +1405,7 @@ def run_flow5_native_design(
                     },
                 ),
             )
-        wing, baseline, wing_meta, wing_response = optimize_wing_pair(
+        wing, baseline, wing_meta, wing_response = optimize_wing_stage(
             foil=foil,
             foil_dat_text=selected_foil_dat_text,
             seed=iteration_seed,
@@ -1507,9 +1535,7 @@ def run_flow5_native_design(
             "foil_objective": float(item["foil_meta"]["objective"]),
             "wing_objective": float(item["wing_meta"]["objective"]),
             "feasible": bool(item["wing_meta"]["feasible"]),
-            "winglet_selection": item["wing_meta"].get(
-                "winglet_comparison", {}
-            ).get("selection", "planar"),
+            "winglet_selection": "not_run_in_coupled_loop",
             "input_source": item["input_source"],
             "baseline_identifier": item["baseline_profile"].identifier,
             "baseline_display_name": item["baseline_profile"].display_name,
@@ -1538,10 +1564,8 @@ def run_flow5_native_design(
     )
     final_design_cl_at_reference = float(target_cls[reference_condition_index])
 
-    section_foils: tuple[
-        CSTAirfoilDesign, CSTAirfoilDesign, CSTAirfoilDesign
-    ] | None = None
-    section_foil_dat_texts: tuple[str, str, str] | None = None
+    section_foils: tuple[AirfoilLike, ...] | None = None
+    section_foil_dat_texts: tuple[str, ...] | None = None
     spanwise_airfoil_meta: dict[str, Any] = {
         "enabled": effective_spanwise_optimization,
         "performed": False,
@@ -1623,7 +1647,7 @@ def run_flow5_native_design(
             optimized_sections[1][3],
         )
         initial_geometry = geometry_from_result(wing)
-        refined_wing, refined_baseline, refined_meta, refined_response = optimize_wing_pair(
+        refined_wing, refined_baseline, refined_meta, refined_response = optimize_wing_stage(
             foil=foil,
             foil_dat_text=selected_foil_dat_text,
             seed=settings.seed + 8093,
@@ -1683,6 +1707,60 @@ def run_flow5_native_design(
             wing_response = refined_response
         wing_meta["spanwise_airfoil_refinement"] = spanwise_airfoil_meta
 
+    # The profile/wing loop is now complete.  Only at this point do we freeze
+    # its planar result and run one independent winglet search with a fixed
+    # NACA section.  Disabling the option skips this block entirely.
+    winglet_foil = naca4_design(settings.winglet_naca_code)
+    winglet_dat_text = airfoil_dat(
+        winglet_foil, total_points=settings.foil_coordinate_points
+    )
+    main_section_foils = section_foils or (foil, foil, foil)
+    main_section_dats = section_foil_dat_texts or (
+        selected_foil_dat_text,
+        selected_foil_dat_text,
+        selected_foil_dat_text,
+    )
+    if settings.winglet_optimization_enabled:
+        active_iteration = (
+            effective_coupled_iterations + int(effective_spanwise_optimization)
+        )
+        planar_result = (wing, baseline, wing_meta, wing_response)
+        wing, baseline, wing_meta, wing_response = optimize_wing_stage(
+            foil=foil,
+            foil_dat_text=selected_foil_dat_text,
+            seed=settings.seed + 12007,
+            checkpoint_label="winglet-post-coupling",
+            checkpoint_payload={
+                "seed": settings.seed + 12007,
+                "planar_geometry": geometry_from_result(wing).to_dict(),
+                "winglet_naca_code": settings.winglet_naca_code,
+                "main_airfoils": [profile.name for profile in main_section_foils],
+            },
+            initial_geometry=geometry_from_result(wing),
+            section_foils=section_foils,
+            section_foil_dat_texts=section_foil_dat_texts,
+            run_winglet=True,
+            fixed_planar=planar_result,
+            winglet_section_foils=(*main_section_foils, winglet_foil),
+            winglet_section_foil_dat_texts=(*main_section_dats, winglet_dat_text),
+        )
+        if wing_meta.get("winglet_comparison", {}).get("selection") == "winglet":
+            section_foils = (*main_section_foils, winglet_foil)
+            section_foil_dat_texts = (*main_section_dats, winglet_dat_text)
+    else:
+        wing_meta["winglet_comparison"] = {
+            "enabled": False,
+            "performed": False,
+            "selected": False,
+            "selection": "planar",
+            "reason": "disabled_by_user",
+            "airfoil": winglet_foil.to_dict(),
+            "airfoil_name": winglet_foil.name,
+            "execution_policy": "post_coupling_once",
+            "execution_count": 0,
+            "included_in_coupled_loop": False,
+        }
+
     reference_polar = min(
         foil_response["polars"], key=lambda polar: abs(polar["speed_m_s"] - reference_speed_m_s)
     )
@@ -1727,7 +1805,7 @@ def run_flow5_native_design(
             "wing": (
                 f"flow5 {wing_meta['search_method']} search + {wing_meta['final_method']} final; "
                 + (
-                    "planar/winglet karşılaştırması; "
+                    "bağlı döngü sonrası tek seferlik planar/winglet karşılaştırması; "
                     if winglet_comparison.get("performed")
                     else ""
                 )
@@ -1749,8 +1827,13 @@ def run_flow5_native_design(
             "cst_order": settings.cst_order,
             "wing_candidate_budget": settings.wing_candidate_budget,
             "winglet_optimization_enabled": settings.winglet_optimization_enabled,
+            "winglet_naca_code": settings.winglet_naca_code,
             "winglet_candidate_budget": settings.winglet_candidate_budget,
             "winglet_selection": winglet_comparison.get("selection", "planar"),
+            "winglet_execution_policy": "post_coupling_once",
+            "winglet_execution_count": int(
+                winglet_comparison.get("execution_count", 0)
+            ),
             "budget_escalation": settings.budget_escalation_settings.to_dict(),
             "foil_budget_convergence": foil_meta.get("budget_convergence", {}),
             "wing_budget_convergence": wing_meta.get("budget_convergence", {}),
@@ -1843,6 +1926,8 @@ def run_flow5_native_design(
             "final_design_cl_at_reference": final_design_cl_at_reference,
             "manual_design_cl_is_seed_only": workflow_mode == "coupled",
             "explicit_design_cl_locked": False,
+            "winglet_included": False,
+            "winglet_policy": "excluded; optional post-coupling stage runs once",
             "history": coupling_history,
         },
         "spanwise_airfoil_optimization": spanwise_airfoil_meta,
@@ -1866,6 +1951,8 @@ def run_flow5_native_design(
             },
             "spanwise_airfoils": spanwise_airfoil_meta,
             "winglet_comparison": winglet_comparison,
+            "winglet_execution_policy": "post_coupling_once",
+            "winglet_naca_airfoil": winglet_foil.to_dict(),
         },
     }
     result["insights"] = _native_insights(
@@ -1953,10 +2040,15 @@ def run_flow5_native_design(
                 "Skaler-puan alternatifi STEP uzunluk birimini metre olarak doğrulamadı"
             )
         scalar_geometry = geometry_from_result(scalar_wing)
+        scalar_section_foils = (
+            (*main_section_foils, winglet_foil)
+            if scalar_geometry.winglet_active
+            else section_foils
+        )
         scalar_obj_text = wing_obj(
             foil,
             scalar_geometry,
-            section_foils=section_foils,
+            section_foils=scalar_section_foils,
         )
         scalar_results_text = flow5_native_results_csv(foil, scalar_wing)
     snapshot = deepcopy(result)
@@ -2038,7 +2130,7 @@ def run_flow5_native_design(
                     "airfoil_dat": dat_text,
                 }
                 for station, dat_text in zip(
-                    ("root", "mid", "tip"), section_foil_dat_texts
+                    ("root", "mid", "tip", "winglet"), section_foil_dat_texts
                 )
             ]
             if section_foil_dat_texts is not None

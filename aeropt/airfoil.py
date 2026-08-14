@@ -9,6 +9,34 @@ import numpy as np
 from .models import AirfoilDesign, AirfoilLike, CSTAirfoilDesign
 
 
+def naca4_design(code: str) -> AirfoilDesign:
+    """Build a conventional four-digit NACA section from a user-facing code."""
+    if not isinstance(code, str):
+        raise ValueError("NACA profil kodu metin olmalı")
+    normalized = "".join(code.upper().split())
+    if normalized.startswith("NACA"):
+        normalized = normalized[4:]
+    if len(normalized) != 4 or not normalized.isdigit():
+        raise ValueError("Winglet profili dört haneli bir NACA kodu olmalı (ör. 0012)")
+
+    camber_digit = int(normalized[0])
+    position_digit = int(normalized[1])
+    thickness_digits = int(normalized[2:])
+    if camber_digit == 0 and position_digit != 0:
+        raise ValueError("Simetrik NACA 4 haneli profilde ilk iki hane 00 olmalı")
+    if camber_digit > 0 and position_digit == 0:
+        raise ValueError("Kamburlu NACA 4 haneli profilde kambur konumu sıfır olamaz")
+    if thickness_digits == 0:
+        raise ValueError("NACA profil kalınlığı sıfır olamaz")
+
+    return AirfoilDesign(
+        max_camber=camber_digit / 100.0,
+        camber_position=(position_digit / 10.0 if position_digit else 0.4),
+        thickness=thickness_digits / 100.0,
+        name=f"NACA{normalized}",
+    )
+
+
 @dataclass(frozen=True)
 class PolarPoint:
     alpha_deg: float
