@@ -113,7 +113,7 @@ Runner'ı elle derlemek için Visual Studio 2022 C++, CMake 3.20+, Qt 6, Gmsh, O
 
 Kök–orta–uç profillerini ayrı optimize etme seçeneği varsayılan olarak kapalıdır; açıldığında iki ek profil optimizasyonu ve bir üç-profilli final kanat çözümü yaptığı için süreyi belirgin artırır.
 
-Tek bir flow5 adayının zaman aşımı arayüzden en çok **21.600 s (6 saat)** yapılabilir; bu sınır önceki 7.200 s değerinden yükseltilmiştir. Bu ayar bütün optimizasyonun toplam süresi değil, her ayrı runner çağrısının üst sınırıdır.
+Tek bir flow5 adayının zaman aşımı için üst sınır yoktur; arayüze en az 30 saniye olmak üzere ihtiyacınız kadar büyük bir değer girebilirsiniz. Bu ayar bütün optimizasyonun toplam süresi değil, her ayrı runner çağrısının üst sınırıdır.
 
 ## Optimizasyon ve çözücü ayrıntıları
 
