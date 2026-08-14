@@ -107,8 +107,12 @@
                 <div class="range-pair"><label>Min<input id="midTwistMin" type="number" min="-12" max="8" step="any" value="-4"></label><span>—</span><label>Max<input id="midTwistMax" type="number" min="-12" max="8" step="any" value="1"></label></div>
               </div>
             </div>
-            <label class="switch-row"><input id="wingletOptimization" type="checkbox"><span></span><b>Winglet tasarımını karşılaştır</b><em>önce planar optimum, sonra flow5 winglet</em></label>
+            <label class="switch-row"><input id="wingletOptimization" type="checkbox"><span></span><b>Winglet tasarımını karşılaştır</b><em>bağlı döngü bittikten sonra yalnız bir kez</em></label>
             <div id="wingletFields" class="disabled-fields">
+              <div class="field full">
+                <label for="wingletNacaCode">Winglet profili <em>NACA 4 haneli</em></label>
+                <input id="wingletNacaCode" type="text" inputmode="numeric" maxlength="9" value="0012" placeholder="0012">
+              </div>
               <div class="range-block">
                 <span class="range-label">Winglet yüksekliği <em>m · dikey bileşen</em></span>
                 <div class="range-pair"><label>Min<input id="wingletHeightMin" type="number" min="0.005" max="10" step="any" value="0.05"></label><span>—</span><label>Max<input id="wingletHeightMax" type="number" min="0.005" max="10" step="any" value="0.40"></label></div>
@@ -125,7 +129,7 @@
                 <span class="range-label">Winglet taper <em>c<sub>tip</sub>/c<sub>junction</sub></em></span>
                 <div class="range-pair"><label>Min<input id="wingletTaperMin" type="number" min="0.1" max="1.2" step="any" value="0.30"></label><span>—</span><label>Max<input id="wingletTaperMax" type="number" min="0.1" max="1.2" step="any" value="1"></label></div>
               </div>
-              <p class="solver-help">Toplam izdüşüm açıklığı sabit tutulur. Winglet, ana kanadın ucuna dördüncü yüksek-dihedral flow5 kesiti olarak eklenir; bağlantı filleti ve yerel gerilme daha sonra CFD/FEA ile doğrulanmalıdır.</p>
+              <p class="solver-help">Profil–kanat bağlı döngüsü önce wingletsiz tamamlanır. Ardından seçilen planar geometri dondurulur ve sabit NACA kesitli winglet yalnız bir kez denenir. Toplam izdüşüm açıklığı ve taşıma hedefi aynı tutulur; sonuç ekranı iki çözümü yan yana verir.</p>
             </div>
           </section>
 

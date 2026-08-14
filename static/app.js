@@ -102,6 +102,7 @@ async function collectRequest() {
       mid_twist_min_deg: numberValue("midTwistMin"),
       mid_twist_max_deg: numberValue("midTwistMax"),
       winglet_optimization_enabled: $("wingletOptimization").checked,
+      winglet_naca_code: $("wingletNacaCode").value.trim(),
       winglet_height_min_m: numberValue("wingletHeightMin"),
       winglet_height_max_m: numberValue("wingletHeightMax"),
       winglet_cant_min_deg: numberValue("wingletCantMin"),
@@ -284,6 +285,7 @@ function applyDefaults(data) {
     multiSeedGeometryCv: data.solver.flow5_multi_seed_geometry_cv_tolerance_percent,
     validationForceTolerance: data.validation.force_closure_tolerance_percent,
     validationDragTolerance: data.validation.drag_decomposition_tolerance_percent,
+    wingletNacaCode: data.wing.winglet_naca_code,
     youngsModulus: data.structure.youngs_modulus_gpa,
     materialDensity: data.structure.material_density_kg_m3,
     allowableStress: data.structure.allowable_stress_mpa,
@@ -514,7 +516,8 @@ function renderComparison(result) {
       const delta = Number(withWinglet)-Number(planar);
       return `<tr><td>${label}</td><td class="${winglet.selection==="planar"?"best":""}">${fmt(planar,digits)} ${unit}</td><td class="${winglet.selection==="winglet"?"best":""}">${fmt(withWinglet,digits)} ${unit}</td><td>${delta>=0?"+":""}${fmt(delta,digits)} ${unit}</td></tr>`;
     };
-    primaryHtml = `<p class="solver-help"><b>${selected}</b> · aynı izdüşüm açıklığı ve taşıma hedefi · ${escapeHtml(winglet.selection_reason || "kısıtlı amaç karşılaştırması")}</p><table class="comparison-table"><thead><tr><th>Gösterge</th><th>Planar optimum</th><th>Winglet optimum</th><th>Winglet − planar</th></tr></thead><tbody>${row("Toplam sürükleme",p.drag_n,w.drag_n,2,"N")}${row("L/D",p.ld,w.ld,1)}${row("Profil Cᴅ",p.cd_profile,w.cd_profile,5)}${row("İndüklenmiş Cᴅ",p.cd_induced,w.cd_induced,5)}${row("İndüklenmiş pay",p.induced_drag_fraction_percent,w.induced_drag_fraction_percent,1,"%")}${row("Kök eğilme momenti (telemetri)",p.root_bending_moment_nm,w.root_bending_moment_nm,1,"N·m")}</tbody></table>`;
+    const geometryRows = `${row("Winglet yüksekliği",0,w.geometry.winglet_height,3,"m")}${row("Winglet cant",0,w.geometry.winglet_cant_deg,1,"°")}${row("Winglet toe",0,w.geometry.winglet_toe_deg,1,"°")}${row("Winglet taper",0,w.geometry.winglet_taper,3)}`;
+    primaryHtml = `<p class="solver-help"><b>${selected}</b> · profil–kanat döngüsü dışında tek son işlem · sabit ${escapeHtml(winglet.airfoil_name || "NACA")} · aynı izdüşüm açıklığı ve taşıma hedefi · ${escapeHtml(winglet.selection_reason || "kısıtlı amaç karşılaştırması")}</p><table class="comparison-table"><thead><tr><th>Gösterge</th><th>Wingletsiz optimum</th><th>Wingletli sonuç</th><th>Wingletli − wingletsiz</th></tr></thead><tbody>${row("Toplam sürükleme",p.drag_n,w.drag_n,2,"N")}${row("L/D",p.ld,w.ld,1)}${row("Profil Cᴅ",p.cd_profile,w.cd_profile,5)}${row("İndüklenmiş Cᴅ",p.cd_induced,w.cd_induced,5)}${row("İndüklenmiş pay",p.induced_drag_fraction_percent,w.induced_drag_fraction_percent,1,"%")}${geometryRows}${row("Kök eğilme momenti (telemetri)",p.root_bending_moment_nm,w.root_bending_moment_nm,1,"N·m")}</tbody></table>`;
   } else {
     const o = result.wing, b = result.rectangular_baseline;
     const row = (label, optimum, baseline, digits=2, unit="") => `<tr><td>${label}</td><td class="best">${fmt(optimum,digits)} ${unit}</td><td>${fmt(baseline,digits)} ${unit}</td></tr>`;
@@ -572,7 +575,7 @@ function renderXfoil(result) {
       row("Profil seçimi", selectionText), row("Baseline iyileşmesi", improvement == null ? "—" : fmt(improvement,2), "%"),
       row("Foil optimizeri", result.solver_run.foil_optimizer || "differential_evolution"),
       row("Kanat optimizeri", result.solver_run.wing_optimizer || "differential_evolution"),
-      row("Winglet karşılaştırması", winglet.performed ? `${winglet.selection === "winglet" ? "winglet seçildi" : "planar seçildi"} · ΔD %${fmt(winglet.delta_winglet_vs_planar?.drag_percent,2)}` : winglet.enabled ? "aşama tamamlanamadı" : "kapalı"),
+      row("Winglet karşılaştırması", winglet.performed ? `${winglet.airfoil_name || "NACA"} · döngü sonrası 1 kez · ${winglet.selection === "winglet" ? "winglet seçildi" : "planar seçildi"} · ΔD %${fmt(winglet.delta_winglet_vs_planar?.drag_percent,2)}` : winglet.enabled ? "döngü sonrası aşama tamamlanamadı" : "kapalı · hiç çalıştırılmadı"),
       row("Fizibilite önceliği olmasaydı", scalarSelection.same_as_feasibility_first ? "aynı kanat" : scalarSelection.available ? `${scalarSelection.stage || "ayrı"} alternatif ayrıca verildi` : "alternatif son çözüm üretilemedi"),
       row("Kanat amaçları", multiObjective.enabled ? `${(multiObjective.objective_specs || []).length} amaç · Pareto rank + crowding` : "skaler amaç"),
       row(
