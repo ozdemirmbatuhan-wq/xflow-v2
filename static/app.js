@@ -567,6 +567,13 @@ function renderXfoil(result) {
     const multiObjective = result.wing_optimization.multi_objective || {};
     const stability = result.multi_seed_stability || {};
     const winglet = result.winglet_comparison || {};
+    const meshStatus = !mesh.enabled
+      ? "kapalı"
+      : mesh.passed
+        ? `geçti · ΔCD %${fmt(mesh.max_cd_change_percent,2)}`
+        : mesh.fine_mesh_valid === false && mesh.fallback_used
+          ? "ince ağ çözülemedi · final ağ sonucu korundu"
+          : "tolerans dışı";
     const summaryRows = [
       row("Başlangıç profili", baseline.display_name || "Eppler E818"),
       row("DAT → CST uyumu", `RMS ${fmt(Number(baseline.fit_rms_over_c)*100,4)} %c`),
@@ -590,7 +597,7 @@ function renderXfoil(result) {
       row("Bütçe · foil", foilBudget.converged === true ? `${foilBudget.evaluations_completed}/${foilBudget.maximum_budget} · yeterli` : foilBudget.converged === false ? `${foilBudget.evaluations_completed}/${foilBudget.maximum_budget} · artır` : `${foilBudget.evaluations_completed || result.airfoil_optimization.candidates_evaluated} · sabit`),
       row("Bütçe · kanat", wingBudget.converged === true ? `${wingBudget.evaluations_completed}/${wingBudget.maximum_budget} · yeterli` : wingBudget.converged === false ? `${wingBudget.evaluations_completed}/${wingBudget.maximum_budget} · artır` : `${wingBudget.evaluations_completed || result.wing_optimization.candidates_evaluated} · sabit`),
       row("Kanat taraması", analysis.wing_solver_search), row("Son doğrulama", analysis.wing_solver_final),
-      row("Mesh yakınsaması", mesh.enabled ? (mesh.passed ? `geçti · ΔCD %${fmt(mesh.max_cd_change_percent,2)}` : "tolerans dışı") : "kapalı"),
+      row("Mesh yakınsaması", meshStatus),
       row("Önbellekten alınan", String(cache.hits || 0), "aday"),
       row("Surrogate · foil", foilSurrogate.enabled ? `${foilSurrogate.proposals_screened || 0} öneri elendi · ${foilSurrogate.real_solver_evaluations || 0} gerçek` : "kapalı"),
       row("Surrogate · kanat", wingSurrogate.enabled ? `${wingSurrogate.proposals_screened || 0} öneri elendi · ${wingSurrogate.real_solver_evaluations || 0} gerçek` : "kapalı"),
@@ -960,13 +967,6 @@ function renderFoilOnlyResult(result) {
   renderBudgetConvergence(result);
   $("insights").innerHTML = (result.insights || []).map((item) => `<div class="insight ${escapeHtml(item.level)}"><i></i><div><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.text)}</p></div></div>`).join("");
   const ex = result.exports;
-  const scalarEx = ex.scalar_only_alternative || {};
-  const scalarDownloads = !scalarEx.same_as_feasibility_first ? [
-    scalarEx.wing_obj ? downloadLink(scalarEx.wing_obj_filename, scalarEx.wing_obj, "model/obj", "Skaler alternatif · OBJ") : "",
-    scalarEx.wing_step_base64 ? base64DownloadLink(scalarEx.wing_step_filename, scalarEx.wing_step_base64, "model/step", "Skaler alternatif · STEP") : "",
-    scalarEx.results_csv ? downloadLink(scalarEx.results_filename, scalarEx.results_csv, "text/csv", "Skaler alternatif · CSV") : "",
-    scalarEx.flow5_project_base64 ? base64DownloadLink(scalarEx.flow5_project_filename, scalarEx.flow5_project_base64, "application/octet-stream", "Skaler alternatif · FL5") : "",
-  ] : [];
   $("downloads").innerHTML = [
     ex.airfoil_dat ? downloadLink(ex.airfoil_filename, ex.airfoil_dat, "text/plain", "Airfoil · DAT") : "",
     ex.xfoil_polar_csv ? downloadLink(ex.xfoil_polar_filename, ex.xfoil_polar_csv, "text/csv", "flow5/XFoil polar · CSV") : "",
@@ -1012,6 +1012,13 @@ function renderResult(result) {
   renderHistory();
   $("insights").innerHTML = result.insights.map((item) => `<div class="insight ${escapeHtml(item.level)}"><i></i><div><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.text)}</p></div></div>`).join("");
   const ex = result.exports;
+  const scalarEx = ex.scalar_only_alternative || {};
+  const scalarDownloads = !scalarEx.same_as_feasibility_first ? [
+    scalarEx.wing_obj ? downloadLink(scalarEx.wing_obj_filename, scalarEx.wing_obj, "model/obj", "Skaler alternatif · OBJ") : "",
+    scalarEx.wing_step_base64 ? base64DownloadLink(scalarEx.wing_step_filename, scalarEx.wing_step_base64, "model/step", "Skaler alternatif · STEP") : "",
+    scalarEx.results_csv ? downloadLink(scalarEx.results_filename, scalarEx.results_csv, "text/csv", "Skaler alternatif · CSV") : "",
+    scalarEx.flow5_project_base64 ? base64DownloadLink(scalarEx.flow5_project_filename, scalarEx.flow5_project_base64, "application/octet-stream", "Skaler alternatif · FL5") : "",
+  ] : [];
   $("downloads").innerHTML = [
     downloadLink(ex.airfoil_filename, ex.airfoil_dat, "text/plain", "Airfoil · DAT"),
     downloadLink(ex.plane_filename, ex.plane_xml, "application/xml", "Plane · XML"),
