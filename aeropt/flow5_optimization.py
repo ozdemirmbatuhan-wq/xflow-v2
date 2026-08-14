@@ -1400,7 +1400,7 @@ def _wing_conditions(
     fluid: Fluid,
     target_lift_n: float,
     alpha_bounds: tuple[float, float],
-) -> tuple[float, list[dict[str, Any]]]:
+) -> tuple[float, list[dict[str, Any]], str | None]:
     drag_ratios: list[float] = []
     conditions: list[dict[str, Any]] = []
     penalty = 0.0
@@ -1408,8 +1408,31 @@ def _wing_conditions(
         speed = float(case["speed_m_s"])
         target_cl = target_lift_n / max(fluid.dynamic_pressure(speed) * geometry.area, 1e-12)
         point = interpolate_at_cl(case["points"], target_cl)
-        if point is None or point.get("cd", 0.0) <= 0.0:
-            return math.inf, []
+        if point is None:
+            converged_cls = [
+                float(row["cl"])
+                for row in case.get("points", [])
+                if row.get("cl") is not None and math.isfinite(float(row["cl"]))
+            ]
+            if converged_cls:
+                coverage = f"{min(converged_cls):.4f}…{max(converged_cls):.4f}"
+                reason = (
+                    f"{speed:g} m/s noktasında hedef CL={target_cl:.4f}, "
+                    f"yakınsayan flow5 aralığı={coverage}; hedef CL ince ağ "
+                    "polar/yakınsama aralığının dışında kaldı"
+                )
+            else:
+                reason = (
+                    f"{speed:g} m/s noktasında hedef CL={target_cl:.4f}; "
+                    "flow5 yakınsayan kanat polar noktası döndürmedi"
+                )
+            return math.inf, [], reason
+        if point.get("cd", 0.0) <= 0.0:
+            return (
+                math.inf,
+                [],
+                f"{speed:g} m/s hedef CL={target_cl:.4f} noktasında flow5 pozitif CD döndürmedi",
+            )
         alpha = float(point["alpha_deg"])
         alpha_violation = max(alpha_bounds[0] - alpha, 0.0, alpha - alpha_bounds[1])
         cl_peak = max(float(row["cl"]) for row in case["points"])
@@ -1441,7 +1464,7 @@ def _wing_conditions(
             }
         )
     robust_drag = float(np.mean(drag_ratios) + 0.45 * np.max(drag_ratios))
-    return robust_drag + penalty / max(len(conditions), 1), conditions
+    return robust_drag + penalty / max(len(conditions), 1), conditions, None
 
 
 def _vector_to_geometry(
@@ -1707,7 +1730,7 @@ def optimize_wing_with_flow5(
                 section_foils=section_foils,
                 section_foil_dat_texts=section_foil_dat_texts,
             )
-            score, conditions = _wing_conditions(
+            score, conditions, condition_error = _wing_conditions(
                 response,
                 geometry,
                 fluid,
@@ -1736,6 +1759,7 @@ def optimize_wing_with_flow5(
                 score,
                 response,
                 conditions,
+                error=condition_error,
                 structural=structural,
                 hydro=hydro,
             )
@@ -2266,39 +2290,135 @@ def optimize_wing_with_flow5(
         raise RuntimeError(f"flow5 son panel doğrulamasında geçerli kanat bulunamadı: {errors}")
     coarse_optimum = min(valid_final, key=wing_candidate_selection_key)
     scalar_coarse_optimum = min(valid_final, key=lambda item: item.score)
-    output_mesh = convergence_mesh if mesh_convergence_enabled else final_mesh
-    optimum = evaluate(
-        coarse_optimum.geometry,
-        final_method,
-        alpha_step_final_deg,
-        True,
-        output_mesh,
+
+    def candidate_is_valid(candidate: WingCandidate) -> bool:
+        return bool(
+            math.isfinite(candidate.score)
+            and candidate.response
+            and candidate.conditions
+        )
+
+    def finalize_output_candidate(
+        coarse: WingCandidate,
+    ) -> tuple[
+        WingCandidate | None,
+        dict[str, Any] | None,
+        Flow5Mesh,
+        bool,
+        str | None,
+    ]:
+        requested_mesh = convergence_mesh if mesh_convergence_enabled else final_mesh
+        attempted = evaluate(
+            coarse.geometry,
+            final_method,
+            alpha_step_final_deg,
+            True,
+            requested_mesh,
+        )
+        if candidate_is_valid(attempted):
+            if mesh_convergence_enabled:
+                report = mesh_convergence_report(
+                    coarse,
+                    attempted,
+                    cd_tolerance_percent=mesh_cd_tolerance_percent,
+                    alpha_tolerance_deg=mesh_alpha_tolerance_deg,
+                )
+                report.update(
+                    {
+                        "status": "passed" if report["passed"] else "tolerance_exceeded",
+                        "fine_mesh_valid": True,
+                        "fallback_used": False,
+                        "reason": None,
+                        "output_mesh": (attempted.response or {}).get(
+                            "mesh", requested_mesh.to_dict()
+                        ),
+                    }
+                )
+            else:
+                report = {
+                    "enabled": False,
+                    "passed": True,
+                    "status": "disabled",
+                    "fine_mesh_valid": None,
+                    "fallback_used": False,
+                    "reason": None,
+                    "coarse_mesh": final_mesh.to_dict(),
+                    "fine_mesh": final_mesh.to_dict(),
+                    "output_mesh": (attempted.response or {}).get(
+                        "mesh", final_mesh.to_dict()
+                    ),
+                    "conditions": [],
+                }
+            return attempted, report, requested_mesh, False, None
+
+        attempted_error = attempted.error or (
+            "İnce ağ flow5 yanıtı hedef taşıma noktasında geçerli koşul üretmedi"
+        )
+        if not mesh_convergence_enabled:
+            return None, None, requested_mesh, False, attempted_error
+
+        # Mesh convergence is a verification gate, not a reason to discard a
+        # solver-verified finalist.  Re-run the already valid final mesh with
+        # artifact/panel export enabled and return it as a review result.
+        fallback = evaluate(
+            coarse.geometry,
+            final_method,
+            alpha_step_final_deg,
+            True,
+            final_mesh,
+        )
+        if not candidate_is_valid(fallback):
+            fallback_error = fallback.error or (
+                "Final ağ tekrarında hedef taşıma noktasında geçerli koşul üretilemedi"
+            )
+            return (
+                None,
+                None,
+                final_mesh,
+                False,
+                f"İnce ağ: {attempted_error}; final ağ tekrarı: {fallback_error}",
+            )
+        report = {
+            "enabled": True,
+            "passed": False,
+            "status": "fine_mesh_invalid_fallback_to_final_mesh",
+            "fine_mesh_valid": False,
+            "fallback_used": True,
+            "reason": attempted_error,
+            "cd_tolerance_percent": float(mesh_cd_tolerance_percent),
+            "alpha_tolerance_deg": float(mesh_alpha_tolerance_deg),
+            "max_cd_change_percent": None,
+            "max_alpha_change_deg": None,
+            "conditions": [],
+            "coarse_mesh": (coarse.response or {}).get("mesh", final_mesh.to_dict()),
+            "fine_mesh": (attempted.response or {}).get(
+                "mesh", convergence_mesh.to_dict()
+            ),
+            "output_mesh": (fallback.response or {}).get(
+                "mesh", final_mesh.to_dict()
+            ),
+        }
+        return fallback, report, final_mesh, True, attempted_error
+
+    optimum, convergence, output_mesh, output_fallback_used, output_error = (
+        finalize_output_candidate(coarse_optimum)
     )
     _emit_progress(
         progress_callback,
         "mesh_convergence",
         1,
         2,
-        "Seçilen kanat yüksek çözünürlüklü ağda çözüldü",
+        (
+            "İnce ağ hedef CL'yi kapsamadı; doğrulanmış final ağ sonucu korunuyor"
+            if output_fallback_used
+            else "Seçilen kanat yüksek çözünürlüklü ağda çözüldü"
+        ),
     )
-    if not math.isfinite(optimum.score) or not optimum.response:
-        raise RuntimeError(f"flow5 yüksek çözünürlüklü son kanadı çözemedi: {optimum.error}")
-    convergence = (
-        mesh_convergence_report(
-            coarse_optimum,
-            optimum,
-            cd_tolerance_percent=mesh_cd_tolerance_percent,
-            alpha_tolerance_deg=mesh_alpha_tolerance_deg,
+    if optimum is None or convergence is None:
+        raise RuntimeError(
+            "flow5 yüksek çözünürlüklü son kanadı çözemedi: "
+            + (output_error or "bilinmeyen final ağ hatası")
         )
-        if mesh_convergence_enabled
-        else {
-            "enabled": False,
-            "passed": True,
-            "coarse_mesh": final_mesh.to_dict(),
-            "fine_mesh": final_mesh.to_dict(),
-            "conditions": [],
-        }
-    )
 
     same_scalar_geometry = bool(
         np.allclose(
@@ -2315,43 +2435,32 @@ def optimize_wing_with_flow5(
         scalar_optimum = optimum
         scalar_convergence = convergence
     else:
-        scalar_optimum = evaluate(
-            scalar_coarse_optimum.geometry,
-            final_method,
-            alpha_step_final_deg,
-            True,
-            output_mesh,
+        (
+            scalar_optimum,
+            scalar_convergence,
+            _,
+            scalar_fallback_used,
+            scalar_finalize_error,
+        ) = finalize_output_candidate(
+            scalar_coarse_optimum
         )
         _emit_progress(
             progress_callback,
             "scalar_only_final",
             1,
             1,
-            "Fizibilite önceliği olmayan alternatif yüksek çözünürlükte çözüldü",
+            (
+                "Skaler alternatif ince ağda çözülemedi; final ağ çıktısı korundu"
+                if scalar_fallback_used
+                else "Fizibilite önceliği olmayan alternatif yüksek çözünürlükte çözüldü"
+            ),
         )
-        if not math.isfinite(scalar_optimum.score) or not scalar_optimum.response:
-            scalar_output_error = scalar_optimum.error or (
-                "Skaler-puan alternatifi yüksek çözünürlüklü son ağda çözülemedi"
+        if scalar_optimum is None or scalar_convergence is None:
+            scalar_output_error = scalar_finalize_error or (
+                "Skaler-puan alternatifi son çıktı ağında çözülemedi"
             )
             scalar_optimum = None
             scalar_convergence = None
-        else:
-            scalar_convergence = (
-                mesh_convergence_report(
-                    scalar_coarse_optimum,
-                    scalar_optimum,
-                    cd_tolerance_percent=mesh_cd_tolerance_percent,
-                    alpha_tolerance_deg=mesh_alpha_tolerance_deg,
-                )
-                if mesh_convergence_enabled
-                else {
-                    "enabled": False,
-                    "passed": True,
-                    "coarse_mesh": final_mesh.to_dict(),
-                    "fine_mesh": final_mesh.to_dict(),
-                    "conditions": [],
-                }
-            )
 
     # The reference is deliberately equal-area; it is a comparison, not a search candidate.
     baseline_chord = float(optimum.geometry.area / optimum.geometry.span)

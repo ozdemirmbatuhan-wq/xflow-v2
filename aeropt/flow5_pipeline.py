@@ -220,19 +220,29 @@ def _native_insights(
         )
     mesh_check = wing_meta.get("mesh_convergence", {})
     if mesh_check.get("enabled"):
+        fine_mesh_invalid = mesh_check.get("fine_mesh_valid") is False
+        if fine_mesh_invalid:
+            mesh_text = (
+                "İnce ağ hedef taşıma noktasını çözemedi; doğrulanmış final ağ "
+                f"sonucu korunarak inceleme durumunda döndürüldü. {mesh_check.get('reason', '')}"
+            ).strip()
+        else:
+            mesh_text = (
+                f"Final ve ince ağ arasında en büyük CD farkı "
+                f"%{float(mesh_check.get('max_cd_change_percent', 0.0)):.2f}, "
+                f"α farkı {float(mesh_check.get('max_alpha_change_deg', 0.0)):.3f}°."
+            )
         messages.append(
             {
                 "level": "good" if mesh_check.get("passed") else "warn",
                 "title": (
                     "Panel ağı yakınsadı"
                     if mesh_check.get("passed")
+                    else "İnce ağ hedef taşıma noktasını çözemedi"
+                    if fine_mesh_invalid
                     else "Panel ağı yakınsama toleransını aştı"
                 ),
-                "text": (
-                    f"Final ve ince ağ arasında en büyük CD farkı "
-                    f"%{float(mesh_check.get('max_cd_change_percent', 0.0)):.2f}, "
-                    f"α farkı {float(mesh_check.get('max_alpha_change_deg', 0.0)):.3f}°."
-                ),
+                "text": mesh_text,
             }
         )
     telemetry = wing_meta.get("solver_telemetry", {})

@@ -608,7 +608,7 @@ def run_design(
     flow5_runner_path = str(solver_cfg.get("flow5_runner_path", "")).strip()
     flow5_threads = int(_number(solver_cfg, "flow5_threads", minimum=1.0, maximum=64.0))
     flow5_timeout = _number(
-        solver_cfg, "flow5_timeout_seconds", minimum=30.0, maximum=21600.0
+        solver_cfg, "flow5_timeout_seconds", minimum=30.0
     )
     flow5_foil_budget = int(
         _number(solver_cfg, "flow5_foil_candidate_budget", minimum=8.0, maximum=4096.0)
