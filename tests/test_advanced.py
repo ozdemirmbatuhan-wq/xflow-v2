@@ -8,6 +8,7 @@ from xml.etree import ElementTree as ET
 
 import numpy as np
 
+from aeropt.airfoil import naca4_design
 from aeropt.baselines import build_baseline_profile
 from aeropt.checkpoint import OptimizerCheckpointStore, optimizer_fingerprint
 from aeropt.convergence import BudgetEscalationController, BudgetEscalationSettings
@@ -101,8 +102,13 @@ class AdvancedAnalysisTests(unittest.TestCase):
         self.assertGreater(geometry.developed_area, geometry.area)
 
         foil = build_baseline_profile("e818").foil
+        winglet_foil = naca4_design("0012")
         xml = flow5_plane_xml(
-            foil, geometry, chordwise_panels=12, half_span_panels=24
+            foil,
+            geometry,
+            chordwise_panels=12,
+            half_span_panels=24,
+            section_foils=(foil, foil, foil, winglet_foil),
         ).replace("<!DOCTYPE flow5>", "")
         root = ET.fromstring(xml)
         sections = root.findall(".//Section")
@@ -112,6 +118,10 @@ class AdvancedAnalysisTests(unittest.TestCase):
             24,
         )
         self.assertAlmostEqual(float(sections[2].findtext("Dihedral")), 78.0)
+        self.assertEqual(
+            [section.findtext("Right_Side_FoilName") for section in sections[-2:]],
+            ["NACA0012", "NACA0012"],
+        )
         main_tip_y = float(sections[2].findtext("y_position"))
         winglet_tip_y = float(sections[3].findtext("y_position"))
         projected_semispan = main_tip_y + (winglet_tip_y - main_tip_y) * np.cos(

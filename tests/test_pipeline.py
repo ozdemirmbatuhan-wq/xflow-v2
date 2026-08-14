@@ -112,6 +112,7 @@ class PipelineTests(unittest.TestCase):
         self.assertTrue(DEFAULT_REQUEST["solver"]["flow5_checkpoint_enabled"])
         self.assertEqual(DEFAULT_REQUEST["solver"]["flow5_wing_optimizer"], "nsga2")
         self.assertFalse(DEFAULT_REQUEST["wing"]["winglet_optimization_enabled"])
+        self.assertEqual(DEFAULT_REQUEST["wing"]["winglet_naca_code"], "0012")
         self.assertNotIn("max_root_bending_moment_nm", DEFAULT_REQUEST["wing"])
         self.assertEqual(DEFAULT_REQUEST["solver"]["flow5_winglet_candidate_budget"], 48)
         self.assertTrue(DEFAULT_REQUEST["solver"]["flow5_budget_escalation_enabled"])
@@ -153,6 +154,44 @@ class PipelineTests(unittest.TestCase):
                 {
                     "workflow": {"mode": "foil_only"},
                     "solver": {"flow5_timeout_seconds": 21601},
+                }
+            )
+
+    def test_winglet_naca_code_is_normalized_only_when_stage_is_enabled(self):
+        with (
+            patch("aeropt.pipeline.resolve_flow5_runner_path", return_value=__file__),
+            patch("aeropt.pipeline.run_flow5_native_design", return_value={}) as native_run,
+        ):
+            run_design(
+                {
+                    "workflow": {"mode": "foil_only"},
+                    "wing": {
+                        "winglet_optimization_enabled": True,
+                        "winglet_naca_code": "NACA 2412",
+                    },
+                }
+            )
+            self.assertEqual(
+                native_run.call_args.kwargs["settings"].winglet_naca_code,
+                "2412",
+            )
+            run_design(
+                {
+                    "workflow": {"mode": "foil_only"},
+                    "wing": {
+                        "winglet_optimization_enabled": False,
+                        "winglet_naca_code": "ignored-while-off",
+                    },
+                }
+            )
+        with self.assertRaises(InputError):
+            run_design(
+                {
+                    "workflow": {"mode": "foil_only"},
+                    "wing": {
+                        "winglet_optimization_enabled": True,
+                        "winglet_naca_code": "23012",
+                    },
                 }
             )
 

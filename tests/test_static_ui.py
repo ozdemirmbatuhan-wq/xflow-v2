@@ -33,6 +33,7 @@ class StaticUiContractTests(unittest.TestCase):
             "flow5WingOptimizer",
             "wingletOptimization",
             "wingletFields",
+            "wingletNacaCode",
             "wingletHeightMin",
             "wingletHeightMax",
             "wingletCantMin",
@@ -55,6 +56,7 @@ class StaticUiContractTests(unittest.TestCase):
         javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         for field in (
             "winglet_optimization_enabled",
+            "winglet_naca_code",
             "winglet_height_min_m",
             "winglet_height_max_m",
             "winglet_cant_min_deg",
@@ -67,7 +69,7 @@ class StaticUiContractTests(unittest.TestCase):
         ):
             self.assertIn(field, javascript)
         self.assertIn("result.winglet_comparison", javascript)
-        self.assertIn("Winglet optimum", javascript)
+        self.assertIn("Wingletli sonuç", javascript)
 
     def test_root_moment_constraint_is_removed_and_step_outputs_are_wired(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")

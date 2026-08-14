@@ -317,7 +317,7 @@ class Flow5NativePipelineTests(unittest.TestCase):
 
     def test_optional_winglet_stage_compares_against_planar_optimum(self):
         request = {
-            "workflow": {"mode": "wing_only"},
+            "workflow": {"mode": "coupled"},
             "flow": {
                 "speed_m_s": 18.0,
                 "speed_min_m_s": 18.0,
@@ -332,6 +332,7 @@ class Flow5NativePipelineTests(unittest.TestCase):
                 "root_chord_min_m": 0.25,
                 "root_chord_max_m": 0.55,
                 "winglet_optimization_enabled": True,
+                "winglet_naca_code": "2412",
                 "winglet_height_min_m": 0.16,
                 "winglet_height_max_m": 0.32,
                 "winglet_cant_min_deg": 72.0,
@@ -345,6 +346,7 @@ class Flow5NativePipelineTests(unittest.TestCase):
                 "airfoil_strategy": "flow5_native",
                 "flow5_runner_path": str(FAKE_RUNNER),
                 "flow5_threads": 16,
+                "flow5_foil_candidate_budget": 8,
                 "flow5_wing_candidate_budget": 8,
                 "flow5_winglet_candidate_budget": 8,
                 "flow5_finalists": 1,
@@ -357,6 +359,7 @@ class Flow5NativePipelineTests(unittest.TestCase):
                 "flow5_surrogate_enabled": False,
                 "flow5_mesh_convergence_enabled": False,
                 "flow5_checkpoint_enabled": False,
+                "flow5_coupled_iterations": 2,
                 "seed": 31,
             },
             "hydro": {"enabled": False},
@@ -374,6 +377,15 @@ class Flow5NativePipelineTests(unittest.TestCase):
         comparison = result["winglet_comparison"]
         self.assertTrue(comparison["enabled"])
         self.assertTrue(comparison["performed"])
+        self.assertEqual(comparison["airfoil_name"], "NACA2412")
+        self.assertEqual(comparison["execution_policy"], "post_coupling_once")
+        self.assertEqual(comparison["execution_count"], 1)
+        self.assertFalse(comparison["included_in_coupled_loop"])
+        self.assertFalse(result["coupled_design"]["winglet_included"])
+        self.assertEqual(
+            [item["winglet_selection"] for item in result["coupled_design"]["history"]],
+            ["not_run_in_coupled_loop", "not_run_in_coupled_loop"],
+        )
         self.assertEqual(
             comparison["selection"], result["solver_run"]["winglet_selection"]
         )
@@ -408,6 +420,12 @@ class Flow5NativePipelineTests(unittest.TestCase):
         )
         expected_sections = 4 if comparison["selection"] == "winglet" else 3
         self.assertEqual(len(exported.findall(".//Section")), expected_sections)
+        if comparison["selection"] == "winglet":
+            names = [
+                section.findtext("Right_Side_FoilName")
+                for section in exported.findall(".//Section")
+            ]
+            self.assertEqual(names[-2:], ["NACA2412", "NACA2412"])
         json.dumps(result, allow_nan=False)
 
     def test_finalist_panel_cavitation_map_is_exported_without_blocking_ld(self):
