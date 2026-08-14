@@ -52,6 +52,20 @@ class StaticUiContractTests(unittest.TestCase):
         ):
             self.assertIn(f'id="{identifier}"', html)
 
+    def test_invalid_fine_mesh_fallback_is_explained_in_results(self):
+        javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("mesh.fine_mesh_valid === false", javascript)
+        self.assertIn("ince ağ çözülemedi · final ağ sonucu korundu", javascript)
+
+    def test_scalar_downloads_are_defined_inside_the_wing_result_renderer(self):
+        javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        render_result = javascript.split("function renderResult(result) {", 1)[1].split(
+            "async function optimize", 1
+        )[0]
+        declaration = render_result.index("const scalarDownloads")
+        usage = render_result.index("...scalarDownloads")
+        self.assertLess(declaration, usage)
+
     def test_winglet_controls_are_serialized_and_comparison_is_rendered(self):
         javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         for field in (
@@ -82,12 +96,13 @@ class StaticUiContractTests(unittest.TestCase):
         self.assertIn("3B CAD · STEP", javascript)
         self.assertIn("Skaler alternatif · STEP", javascript)
 
-    def test_cavitation_map_controls_and_extended_timeout_are_wired(self):
+    def test_cavitation_map_controls_and_unbounded_timeout_are_wired(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
         javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         timeout = re.search(r'<input\b[^>]*id="flow5Timeout"[^>]*>', html)
         self.assertIsNotNone(timeout)
-        self.assertIn('max="21600"', timeout.group(0))
+        self.assertNotIn('max=', timeout.group(0))
+        self.assertIn("üst sınır yok", html)
         self.assertIn('value="report_only"', html)
         self.assertIn("constraint_mode", javascript)
         self.assertIn("function renderCavitation", javascript)

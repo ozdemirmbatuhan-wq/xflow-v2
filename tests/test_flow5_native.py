@@ -13,7 +13,7 @@ import zipfile
 from xml.etree import ElementTree as ET
 
 from aeropt.pipeline import InputError, run_design
-from aeropt.flow5 import _hidden_subprocess_kwargs
+from aeropt.flow5 import Flow5Mesh, Flow5Runner, _hidden_subprocess_kwargs
 from aeropt.flow5_pipeline import _sample_speeds
 
 
@@ -426,6 +426,83 @@ class Flow5NativePipelineTests(unittest.TestCase):
                 for section in exported.findall(".//Section")
             ]
             self.assertEqual(names[-2:], ["NACA2412", "NACA2412"])
+        json.dumps(result, allow_nan=False)
+
+    def test_invalid_fine_mesh_keeps_verified_final_mesh_as_review_result(self):
+        original_analyze_wing = Flow5Runner.analyze_wing
+
+        def reject_only_the_fine_mesh(runner, *args, **kwargs):
+            response = original_analyze_wing(runner, *args, **kwargs)
+            mesh = kwargs.get("mesh")
+            if isinstance(mesh, Flow5Mesh) and mesh == Flow5Mesh(20, 32):
+                response = deepcopy(response)
+                for case in response.get("cases", []):
+                    case["points"] = []
+            return response
+
+        request = {
+            "workflow": {"mode": "coupled"},
+            "flow": {
+                "fluid": "sea_water",
+                "speed_m_s": 7.5,
+                "speed_min_m_s": 7.5,
+                "speed_max_m_s": 7.5,
+                "speed_samples": 1,
+                "target_lift_n": 1500.0,
+            },
+            "wing": {
+                "span_min_m": 0.40,
+                "span_max_m": 0.45,
+                "root_chord_min_m": 0.10,
+                "root_chord_max_m": 0.20,
+                "taper_min": 0.50,
+                "taper_max": 1.0,
+            },
+            "solver": {
+                "airfoil_strategy": "flow5_native",
+                "flow5_runner_path": str(FAKE_RUNNER),
+                "flow5_threads": 16,
+                "flow5_foil_candidate_budget": 8,
+                "flow5_wing_candidate_budget": 8,
+                "flow5_finalists": 1,
+                "flow5_coupled_iterations": 1,
+                "flow5_budget_escalation_enabled": False,
+                "flow5_surrogate_enabled": False,
+                "flow5_cache_enabled": False,
+                "flow5_checkpoint_enabled": False,
+                "flow5_mesh_convergence_enabled": True,
+                "seed": 42,
+            },
+            "hydro": {"enabled": True, "constraint_mode": "report_only"},
+        }
+        old_value = os.environ.get("AEROPT_ALLOW_TEST_DOUBLE")
+        os.environ["AEROPT_ALLOW_TEST_DOUBLE"] = "1"
+        try:
+            with patch.object(
+                Flow5Runner, "analyze_wing", new=reject_only_the_fine_mesh
+            ):
+                result = run_design(request)
+        finally:
+            if old_value is None:
+                os.environ.pop("AEROPT_ALLOW_TEST_DOUBLE", None)
+            else:
+                os.environ["AEROPT_ALLOW_TEST_DOUBLE"] = old_value
+
+        convergence = result["wing_optimization"]["mesh_convergence"]
+        self.assertEqual(result["status"], "review")
+        self.assertFalse(convergence["passed"])
+        self.assertFalse(convergence["fine_mesh_valid"])
+        self.assertTrue(convergence["fallback_used"])
+        self.assertEqual(
+            convergence["status"], "fine_mesh_invalid_fallback_to_final_mesh"
+        )
+        self.assertIn("yakınsayan kanat polar noktası", convergence["reason"])
+        self.assertEqual(
+            result["wing_optimization"]["output_mesh"], Flow5Mesh(14, 22).to_dict()
+        )
+        self.assertTrue(result["hydro_analysis"]["panel_map_available"])
+        self.assertTrue(result["exports"]["flow5_project_base64"])
+        self.assertTrue(result["exports"]["wing_step_base64"])
         json.dumps(result, allow_nan=False)
 
     def test_finalist_panel_cavitation_map_is_exported_without_blocking_ld(self):

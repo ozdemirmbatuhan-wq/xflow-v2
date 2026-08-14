@@ -131,7 +131,7 @@ class PipelineTests(unittest.TestCase):
         )
         self.assertNotIn("max_root_bending_moment_nm", migrated["wing"])
 
-    def test_flow5_candidate_timeout_accepts_six_hours_and_rejects_more(self):
+    def test_flow5_candidate_timeout_has_no_upper_limit(self):
         with (
             patch(
                 "aeropt.pipeline.resolve_flow5_runner_path",
@@ -145,15 +145,18 @@ class PipelineTests(unittest.TestCase):
             run_design(
                 {
                     "workflow": {"mode": "foil_only"},
-                    "solver": {"flow5_timeout_seconds": 21600},
+                    "solver": {"flow5_timeout_seconds": 31536000},
                 }
             )
-        self.assertEqual(native_run.call_args.kwargs["settings"].timeout_seconds, 21600)
+        self.assertEqual(
+            native_run.call_args.kwargs["settings"].timeout_seconds,
+            31536000,
+        )
         with self.assertRaises(InputError):
             run_design(
                 {
                     "workflow": {"mode": "foil_only"},
-                    "solver": {"flow5_timeout_seconds": 21601},
+                    "solver": {"flow5_timeout_seconds": 29},
                 }
             )
 

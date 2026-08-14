@@ -520,6 +520,35 @@ class AdvancedAnalysisTests(unittest.TestCase):
         self.assertEqual(report["runs_completed"], 3)
         self.assertGreater(report["objective_cv_percent"], 0.0)
 
+    def test_multi_seed_report_preserves_the_common_root_failure(self):
+        records = [
+            {
+                "seed": seed,
+                "result": None,
+                "error": "flow5 ince profil doğrulamasında hedef CL aralığı yakınsamadı",
+                "failure_diagnosis": {
+                    "title": "Hedef CL polar/yakınsama aralığının dışında kaldı"
+                },
+            }
+            for seed in (42, 100045, 200048)
+        ]
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"Ortak kök hata \(3/3 seed\).*hedef CL aralığı yakınsamadı",
+        ):
+            build_multi_seed_report(records)
+
+    def test_multi_seed_report_preserves_distinct_seed_failures(self):
+        records = [
+            {"seed": 42, "result": None, "error": "ilk kök hata"},
+            {"seed": 100045, "result": None, "error": "ikinci kök hata"},
+        ]
+        with self.assertRaises(RuntimeError) as captured:
+            build_multi_seed_report(records)
+        message = str(captured.exception)
+        self.assertIn("seed 42: ilk kök hata", message)
+        self.assertIn("seed 100045: ikinci kök hata", message)
+
     def test_runtime_failure_diagnosis_returns_actionable_runner_advice(self):
         diagnosis = diagnose_runtime_failure(
             "flow5 API sürümü uyumsuz: runner 8.0, beklenen 7.57"
