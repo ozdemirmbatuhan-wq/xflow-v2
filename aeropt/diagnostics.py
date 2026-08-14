@@ -149,12 +149,22 @@ def build_diagnostic_report(
         )
     mesh = result.get("wing_optimization", {}).get("mesh_convergence", {})
     if mesh.get("enabled") and not mesh.get("passed"):
+        if mesh.get("fine_mesh_valid") is False:
+            mesh_evidence = str(
+                mesh.get("reason")
+                or "İnce ağ hedef taşıma noktasında geçerli polar üretmedi"
+            )
+        else:
+            mesh_evidence = (
+                f"ΔCD %{float(mesh.get('max_cd_change_percent', 0.0)):.2f}, "
+                f"Δα {float(mesh.get('max_alpha_change_deg', 0.0)):.3f}°."
+            )
         diagnoses.append(
             _entry(
                 "mesh_not_converged",
                 "critical",
                 "Panel ağı yakınsamadı",
-                f"ΔCD %{float(mesh.get('max_cd_change_percent', 0.0)):.2f}, Δα {float(mesh.get('max_alpha_change_deg', 0.0)):.3f}°.",
+                mesh_evidence,
                 "Final/ince panel sayılarını artırın veya geometri/polar yakınsama sorununu giderin.",
             )
         )

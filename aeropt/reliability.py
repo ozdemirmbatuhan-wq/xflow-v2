@@ -12,6 +12,38 @@ import numpy as np
 from .exporters import project_json
 
 
+def _all_seed_failure_message(records: list[dict[str, Any]]) -> str:
+    """Keep the optimizer's real per-seed errors when every run fails."""
+    failures: list[tuple[Any, str]] = []
+    for item in records:
+        diagnosis = item.get("failure_diagnosis")
+        if not isinstance(diagnosis, dict):
+            diagnosis = {}
+        raw_error = (
+            item.get("error")
+            or diagnosis.get("evidence")
+            or diagnosis.get("title")
+            or "Bilinmeyen optimizer hatası"
+        )
+        error = " ".join(str(raw_error).split()).strip()
+        failures.append((item.get("seed", "?"), error or "Bilinmeyen optimizer hatası"))
+
+    if not failures:
+        return "Hiçbir seed optimizasyonu tamamlanamadı; seed hata kaydı oluşmadı."
+
+    unique_errors = list(dict.fromkeys(error for _, error in failures))
+    if len(unique_errors) == 1:
+        detail = (
+            f"Ortak kök hata ({len(failures)}/{len(failures)} seed): "
+            f"{unique_errors[0]}"
+        )
+    else:
+        detail = "Seed hataları: " + "; ".join(
+            f"seed {seed}: {error}" for seed, error in failures
+        )
+    return f"Hiçbir seed optimizasyonu tamamlanamadı. {detail}"[:4000]
+
+
 def build_multi_seed_report(
     records: list[dict[str, Any]],
     *,
@@ -23,7 +55,7 @@ def build_multi_seed_report(
         (index, item) for index, item in enumerate(records) if item.get("result") is not None
     ]
     if not successful:
-        raise RuntimeError("Hiçbir seed optimizasyonu tamamlanamadı")
+        raise RuntimeError(_all_seed_failure_message(records))
     selected_index, selected = min(
         successful,
         key=lambda indexed: (
