@@ -42,6 +42,7 @@
     "mid_twist_min_deg": -4.0,
     "mid_twist_max_deg": 1.0,
     "winglet_optimization_enabled": false,
+    "winglet_naca_code": "0012",
     "winglet_height_min_m": 0.05,
     "winglet_height_max_m": 0.4,
     "winglet_cant_min_deg": 60.0,

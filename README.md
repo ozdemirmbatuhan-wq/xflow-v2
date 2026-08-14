@@ -1,6 +1,6 @@
 # AeroOpt 0.8 — flow5 tabanlı çok amaçlı profil ve kanat optimizasyonu
 
-AeroOpt, Eppler E818 veya kullanıcının verdiği bir DAT profiliyle başlar; serbest biçimli CST/Kulfan profilini, üç istasyonlu planar kanadı ve istenirse dördüncü yüksek-dihedral winglet kesitini gerçek flow5 analizleriyle optimize eder. Varsayılan `flow5_native` zincirinde AeroOpt'un eski aerodinamik korelasyonları amaç fonksiyonuna girmez.
+AeroOpt, Eppler E818 veya kullanıcının verdiği bir DAT profiliyle başlar; serbest biçimli CST/Kulfan profilini ve üç istasyonlu planar kanadı gerçek flow5 analizleriyle optimize eder. İstenirse bağlı profil–kanat döngüsü bittikten sonra sabit bir NACA 4 haneli kesitle bağımsız winglet karşılaştırması çalıştırır. Varsayılan `flow5_native` zincirinde AeroOpt'un eski aerodinamik korelasyonları amaç fonksiyonuna girmez.
 
 ## Tasarım zinciri
 
@@ -8,7 +8,7 @@ AeroOpt, Eppler E818 veya kullanıcının verdiği bir DAT profiliyle başlar; s
 2. Profil adayları Differential Evolution ile oluşturulur. RBF surrogate yeterli gerçek örnek oluşunca yalnızca hangi DE önerisinin çözücüye gideceğini seçer; amaç değeri hiçbir zaman tahminle değiştirilmez. Her solver DAT'ı başlık hariç tam **100 koordinat noktası** içerir.
 3. Her aday, hız aralığındaki Reynolds/Mach noktalarında flow5'in gömülü `XFoilTask` çözücüsüyle analiz edilir.
 4. Profil ve kanat varsayılan iki bağlı iterasyonda çalışır: ilk kanattan alınan gerçek MAC, Reynolds ve spanwise yerel Cl hedefleri yeniden profil optimizasyonuna beslenir.
-5. Kanat açıklığı, kök chord, taper, çeyrek-chord sweep, uç twist; istenirse orta-istasyon chord ve twist değişkenleri optimize edilir. Winglet tasarımı açılırsa önce planar optimum, ardından aynı izdüşümsel span/hedef taşımada yükseklik–cant–toe–taper winglet aşaması çözülür ve iki tasarım doğrudan karşılaştırılır.
+5. Kanat açıklığı, kök chord, taper, çeyrek-chord sweep, uç twist; istenirse orta-istasyon chord ve twist değişkenleri optimize edilir. Winglet bu döngüye girmez. Seçenek açıksa final planar kanat bulunduktan sonra yalnız bir winglet aşaması çalışır; aynı izdüşümsel span/hedef taşımada yükseklik–cant–toe–taper aranır ve wingletli/wingletsiz sonuçlar doğrudan karşılaştırılır.
 6. Arama ağı ve final ağı sonrasında daha ince üçüncü ağla CD/hedef-Cl alfa yakınsaması kontrol edilir. Yakınsamayan, `out_of_mesh` olan veya viskoz çözümü başarısız noktalar uygun kabul edilmez.
 7. İstenirse kök–orta–uç profilleri yerel Reynolds/Cl koşullarında ayrı ayrı optimize edilir ve üç profilli kanat yeniden çözülür.
 8. Varsayılan kanat optimizeri gerçek NSGA-II'dir. Sürükleme ve stall kullanımı; yapısal denetim açıksa ayrıca kütle/yapısal kullanım, Pareto rütbesi ve crowding-distance ile birlikte optimize edilir. Kök eğilme momenti yalnız telemetridir; amaç, kısıt veya fizibilite koşulu değildir.
@@ -29,7 +29,7 @@ Uzun işlemler arka planda yürür. Arayüz gerçek aşama/aday/seed ilerlemesin
 | Optimizer checkpoint | Açık | Popülasyon + RNG + surrogate durumunu problem parmak iziyle saklar; aynı ayarlarla yeniden başlatınca geri yükler |
 | Multi-seed | 1 koşu | Arayüzden 3 veya 5 bağımsız seed seçilebilir; en iyi fizibil koşu seçilir, amaç/geometri CV raporlanır |
 | Pareto analizi | Açık | NSGA-II seçilince cephe optimizer tarafından üretilir; DE/adaptive seçilince gerçek çözücü adaylarından sonradan çıkarılır |
-| Winglet tasarımı | Kapalı | Planar optimumdan sonra dört-kesitli yüksek-dihedral flow5 geometrisinde yükseklik, cant, toe ve taper aranır; drag, indüklenmiş CD, L/D ve yalnız telemetri olarak kök moment farkları raporlanır |
+| Winglet tasarımı | Kapalı | Bağlı döngü ve spanwise profil iyileştirmesi bittikten sonra seçilen planar geometri dondurulur. Varsayılan NACA 0012 veya girilen NACA 4 haneli kesitle yalnız bir son aşamada yükseklik, cant, toe ve taper aranır; wingletli/wingletsiz sonuçlar birlikte raporlanır |
 | Doğrulama/regresyon | Açık | Dokuz tutarlılık/makullük kontrolü ve tekrarlanabilir SHA-256 sonuç imzası üretir |
 | Otomatik teşhis | Açık | Stall, Reynolds, drag bileşeni, mesh, solver noktası, sınır, coupling, seed, yapı ve kavitasyon kanıtlarını kurallarla sıralar |
 | Proje geçmişi | Açık | Son 12 tasarım özetini tarayıcı yerel depolamasında tutar ve iki tasarımı yan yana karşılaştırır |
@@ -142,7 +142,7 @@ Tek bir flow5 adayının zaman aşımı arayüzden en çok **21.600 s (6 saat)**
 - Aynı arama havuzundaki en düşük skaler amaçlı aday finalist kotasını tüketmeden ayrıca korunur. Fizibilite önceliği kullanılmadan seçilecek bu kanat final ağında yeniden çözülür; ana kanattan farklıysa performans/geometri karşılaştırması ile ayrı OBJ, kapalı-katı STEP, CSV ve `.fl5` dosyaları üretilir.
 - Viskoz profil drag'i gömülü XFoil'den; 3B/indüklenmiş bileşen ve spanwise dağılım flow5 çalışma noktalarından gelir.
 - İnce ağdaki sonuç final `.fl5` projesine ve metre birimli OpenCascade STEP katısına yazılır. Eş alanlı dikdörtgen baseline aynı final yöntem/ağ ile karşılaştırılır.
-- Winglet seçeneği planar aramayı kaldırmaz. Planar optimum tamamlandıktan sonra ana planform sabitlenir; toplam izdüşümsel span korunarak ana kanat yarı-açıklığı winglet yatay izdüşümü kadar kısaltılır ve dördüncü yüksek-dihedral kesitte yalnız yükseklik, cant, toe ve taper optimize edilir. Son karar fizibiliteyi önceleyip aynı planform/hedef taşıma koşulundaki kısıtlı toplam amacı karşılaştırır.
+- Winglet seçeneği kapalıysa winglet çözücüsü hiç çağrılmaz. Açıksa profil–kanat bağlı döngüsü ve isteğe bağlı kök–orta–uç profil iyileştirmesi tamamen wingletsiz biter. Son planar geometri dondurulur; toplam izdüşümsel span korunarak ana kanat yarı-açıklığı winglet yatay izdüşümü kadar kısaltılır ve dördüncü yüksek-dihedral kesitte sabit `winglet_naca_code` profiliyle yalnız yükseklik, cant, toe ve taper optimize edilir. Bu son aşama döngüye geri beslenmez. Son karar fizibiliteyi önceleyip aynı planform/hedef taşıma koşulundaki wingletli ve wingletsiz sonuçları karşılaştırır.
 
 ### Kavitasyon haritası ve etki göstergeleri
 
@@ -196,6 +196,7 @@ result = run_design({
     },
     "wing": {
         "winglet_optimization_enabled": True,
+        "winglet_naca_code": "0012",
         "winglet_height_min_m": 0.10,
         "winglet_height_max_m": 0.35,
         "winglet_cant_min_deg": 65.0,
