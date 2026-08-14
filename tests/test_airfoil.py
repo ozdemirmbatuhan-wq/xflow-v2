@@ -10,6 +10,7 @@ from aeropt.airfoil import (
     fit_naca_to_cst,
     generate_polar,
     naca4_coordinates,
+    naca4_design,
     polar_point,
     thin_airfoil_properties,
 )
@@ -19,6 +20,17 @@ from aeropt.models import AirfoilDesign
 
 
 class AirfoilTests(unittest.TestCase):
+    def test_four_digit_naca_code_is_normalized_and_validated(self):
+        foil = naca4_design("NACA 2412")
+        self.assertEqual(foil.name, "NACA2412")
+        self.assertAlmostEqual(foil.max_camber, 0.02)
+        self.assertAlmostEqual(foil.camber_position, 0.4)
+        self.assertAlmostEqual(foil.thickness, 0.12)
+        with self.assertRaises(ValueError):
+            naca4_design("23012")
+        with self.assertRaises(ValueError):
+            naca4_design("0010x")
+
     def test_eppler_e818_cst6_fit_and_solver_contour_use_exactly_100_points(self):
         baseline = build_baseline_profile("e818", cst_order=6, solver_point_count=100)
         self.assertEqual(baseline.identifier, "e818")
