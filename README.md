@@ -15,9 +15,11 @@ AeroOpt, Eppler E818 veya kullanıcının verdiği bir DAT profiliyle başlar; s
 9. Profil ve kanat başlangıç bütçeleri, amaç/Pareto hareketi tolerans dışındaysa örneğin `48 → 96 → 192` biçiminde otomatik büyür. Yakınsama sağlanırsa kullanılmayan bütçe harcanmaz; azami bütçede hareket sürerse sonuç bütçe-sınırlı işaretlenir.
 10. Su taraması açıksa arama adaylarında hızlı `Cp_min` kısıtı kullanılır; seçilen yüksek çözünürlüklü finalistte gerçek flow5 panel köşeleri ve Cp değerleri ayrıca alınarak 3B risk haritası, riskli alan, açıklık dağılımı ve hız/derinlik duyarlılığı hesaplanır.
 11. Solver kimliği, 100-nokta sözleşmesi, kuvvet/CD kapanışı, mesh, telemetri ve fiziksel makullük kontrolleri otomatik doğrulama raporuna yazılır.
-12. Sonuçlar DAT, XML, OBJ, kapalı-katı STEP, CSV, doğrulama/Pareto/teşhis/kavitasyon JSON'ları, ZIP ve yalnızca flow5 gerçekten kaydettiyse `.fl5` olarak dışa aktarılır. Fizibilite önceliği olmadan skaler puanın seçeceği kanat farklıysa onun OBJ/STEP/CSV/FL5 dosyaları da ayrıca verilir.
+12. Sonuçlar DAT, XML, OBJ, kapalı-katı STEP, CSV, doğrulama/Pareto/teşhis/kavitasyon JSON'ları, ZIP ve yalnızca flow5 gerçekten kaydettiyse `.fl5` olarak dışa aktarılır. Fizibilite önceliği olmadan skaler puanın seçeceği kanat farklıysa onun OBJ/STEP/CSV/FL5 dosyaları da ayrıca verilir. Referans hızda en yüksek L/D'ye sahip fizibil finalist normal finalist kotasını tüketmeden final ağında doğrulanır, ana seçimle karşılaştırılır ve ZIP içindeki `highest-ld/` klasörüne XML/OBJ/STEP/CSV/JSON/DAT/FL5 olarak yazılır.
 
-Uzun işlemler arka planda yürür. Arayüz gerçek aşama/aday/seed ilerlemesini gösterir ve işi iptal edebilir. İki ayrı devam katmanı vardır: SHA-256 değerlendirme önbelleği tamamlanmış flow5 yanıtlarını, optimizer checkpoint'i ise DE veya NSGA-II popülasyonunu, nesli, değerlendirme geçmişini, bütçe denetleyicisini, RNG durumunu ve varsa surrogate örneklerini atomik JSON olarak saklar. Checkpoint nesil sınırlarında alınır; neslin ortasında iptal edilirse son tamamlanmış nesilden devam edilir. Başarıyla biten problem checkpoint'i temizlenir.
+Uzun işlemler arka planda yürür. Arayüz gerçek aşama/aday/seed ilerlemesini gösterir ve işi iptal edebilir. İptal edildiğinde o ana kadar tamamlanmış gerçek flow5 çözümleri arasındaki en iyi profil ve varsa en iyi kanat ekranda **ara sonuç** olarak gösterilir; DAT ve `best-so-far` JSON'u indirilebilir. Bunlar finalist/ince-ağ doğrulaması tamamlanmış nihai sonuç sayılmaz. İki ayrı devam katmanı vardır: SHA-256 değerlendirme önbelleği tamamlanmış flow5 yanıtlarını, optimizer checkpoint'i ise DE veya NSGA-II popülasyonunu, nesli, değerlendirme geçmişini, bütçe denetleyicisini, RNG durumunu ve varsa surrogate örneklerini atomik JSON olarak saklar. Checkpoint nesil sınırlarında alınır; neslin ortasında iptal edilirse son tamamlanmış nesilden devam edilir. Başarıyla biten problem checkpoint'i temizlenir.
+
+Normal tamamlanmada arayüz bütün çıktı dosyalarını içeren tek ZIP paketini otomatik indirir; tekil DAT/XML/OBJ/STEP/CSV/JSON/FL5 düğmeleri sonuç ekranında ayrıca kalır. En yüksek L/D finalistinin tekil geometri düğmeleri ayrı gösterilir ve aynı dosyalar ana ZIP'te `highest-ld/` altında tutulur. Yalnız profil modunda da DAT, polar CSV ve proje JSON'unu içeren profil ZIP'i aynı şekilde otomatik indirilir.
 
 ## 0.8 optimizasyon ve karar araçları
 
@@ -105,6 +107,7 @@ Runner'ı elle derlemek için Visual Studio 2022 C++, CMake 3.20+, Qt 6, Gmsh, O
 
 1. Akışkanı, referans/minimum/maksimum hızı, hız noktası sayısını ve toplam hedef taşımayı girin.
 2. Kanat sınırlarını girin; E818, CST6 ve 100 profil noktası seçili kalabilir.
+   Bir kanat geometri değişkenini sabitlemek için ilgili Min ve Max alanlarına aynı değeri girin. Örneğin açıklık `1,75 / 1,75`, kök chord `0,31 / 0,31` girildiğinde bu değerler optimizer tarafından değiştirilmez.
 3. Hızlı kurulum kontrolünde profil/kanat başlangıç bütçelerini `8 / 8`, finalist sayısını `1` yapın. Mutlak kısa smoke test istiyorsanız otomatik bütçe denetimini geçici olarak kapatın; açıkken arama gerek görürse `8 → 16 → 32` büyür.
 4. Mesh yakınsamasını açık bırakın. Arama/final/ince varsayılanları sırasıyla `10×14`, `14×22`, `20×32`'dir.
 5. Yapısal hesabı istemiyorsanız yapısal anahtarı kapalı bırakın. Su seçtiyseniz derinlik, buhar basıncı, kavitasyon güvenlik katsayısı ve sert-kısıt/yalnız-rapor politikasını kontrol edin.
@@ -140,6 +143,7 @@ Tek bir flow5 adayının zaman aşımı için üst sınır yoktur; arayüze en a
 - Varsayılan optimizer NSGA-II'dir. Fizibil olmayan adaylar toplam kısıt ihlaline göre; fizibil adaylar sürükleme–stall ve etkinleştirilen mühendislik amaçlarının Pareto rütbesi/crowding mesafesine göre seçilir. Kök eğilme momenti bu sıralamaların hiçbirine girmez.
 - Final doğrulamasına fizibilite-öncelikli uzlaşma adayı ile Pareto cephesinin seyrek bölgelerinden temsilciler gönderilir. Final teslimi önce en düşük sert-kısıt ihlaline, eşitlikte en düşük skaler toplam amaca göre seçilir.
 - Aynı arama havuzundaki en düşük skaler amaçlı aday finalist kotasını tüketmeden ayrıca korunur. Fizibilite önceliği kullanılmadan seçilecek bu kanat final ağında yeniden çözülür; ana kanattan farklıysa performans/geometri karşılaştırması ile ayrı OBJ, kapalı-katı STEP, CSV ve `.fl5` dosyaları üretilir.
+- Referans hızdaki en yüksek L/D'li sert-kısıt uygun arama adayı da finalist kotasının dışında korunur. Final ağındaki fizibil finalistler yeniden sıralanır; kazanan yüksek çözünürlükte çözülür ve ana seçimle aynı olsa bile `highest-ld/` klasöründe bağımsız XML, OBJ, metre birimli STEP, CSV, özet JSON, DAT ve çözümlenmiş `.fl5` olarak teslim edilir.
 - Viskoz profil drag'i gömülü XFoil'den; 3B/indüklenmiş bileşen ve spanwise dağılım flow5 çalışma noktalarından gelir.
 - İnce ağdaki sonuç final `.fl5` projesine ve metre birimli OpenCascade STEP katısına yazılır. Eş alanlı dikdörtgen baseline aynı final yöntem/ağ ile karşılaştırılır.
 - Winglet seçeneği kapalıysa winglet çözücüsü hiç çağrılmaz. Açıksa profil–kanat bağlı döngüsü ve isteğe bağlı kök–orta–uç profil iyileştirmesi tamamen wingletsiz biter. Son planar geometri dondurulur; toplam izdüşümsel span korunarak ana kanat yarı-açıklığı winglet yatay izdüşümü kadar kısaltılır ve dördüncü yüksek-dihedral kesitte sabit `winglet_naca_code` profiliyle yalnız yükseklik, cant, toe ve taper optimize edilir. Bu son aşama döngüye geri beslenmez. Son karar fizibiliteyi önceleyip aynı planform/hedef taşıma koşulundaki wingletli ve wingletsiz sonuçları karşılaştırır.
@@ -152,9 +156,9 @@ Tek bir flow5 adayının zaman aşımı için üst sınır yoktur; arayüze en a
 - Rapor; riskli alan yüzdesi, emniyet katsayısız fiziksel başlangıç alanı, maksimum kullanım, alan-ağırlıklı şiddet, buhar basıncı altındaki basınç açığı–alan integrali, bileşen/yüzey ve açıklık dağılımlarını içerir.
 - Hız ve derinlik grafikleri finalist Cp alanını sabit tutan beşer noktalı duyarlılık taramasıdır. Bunlar çok fazlı yeniden çözüm değildir; gerçek kavite boyu/hacmi, ventilasyon veya kavitasyon kaynaklı drag/L/D kaybı iddia edilmez.
 
-### 16 çekirdek
+### Toplam CPU bütçesi
 
-Profil aşamasında Reynolds noktaları ve adaylar, toplam eşzamanlı bütçe yaklaşık `flow5_threads` olacak biçimde dış süreçlere dağıtılır. Kanat adayları sırayla çalışır; flow5 panel çözümüne en çok 16 iç thread verilir. Böylece `16 süreç × 16 thread` aşırı aboneliği oluşturulmaz. Gerçek ölçeklenme mesh ve flow5'in derleme bağımlılıklarına bağlıdır.
+`flow5_threads` artık yalnız flow5 içindeki bir ayar değil, bütün yerel optimizasyonun toplam iş-parçacığı bütçesidir. Profil aşamasında Reynolds noktaları ve aday süreçleri `dış süreç × vaka işçisi ≤ flow5_threads` olacak biçimde dağıtılır; kanat adayları sırayla çalışır ve flow5 panel çözümü aynı sınıra uyar. Her flow5 alt sürecindeki OpenBLAS/MKL/OpenMP/NumExpr havuzu ayrıca 1 iş parçacığına sabitlenir; Python'daki NumPy/SciPy BLAS havuzu da kullanıcı bütçesiyle sınırlandırılır. Böylece özellikle profil aramasında iç içe paralellik yüzünden girilen değerin katları kadar CPU işçisi açılmaz. Girilen değer makinenin mantıksal CPU sayısından büyükse etkin bütçe otomatik olarak mevcut CPU sayısına düşürülür ve sonuç raporunda istenen/etkin değerler gösterilir.
 
 ### Otomatik bütçe, multi-seed ve Pareto
 

@@ -44,6 +44,7 @@ class OptimizationJobs:
             },
             "cancel_event": cancel_event,
             "result": None,
+            "best_so_far": None,
             "error": None,
         }
         with self._lock:
@@ -53,7 +54,19 @@ class OptimizationJobs:
             with self._lock:
                 current = self._jobs.get(job_id)
                 if current is not None:
-                    current["progress"] = dict(progress)
+                    progress_payload = dict(progress)
+                    best_update = progress_payload.pop("best_so_far", None)
+                    if isinstance(best_update, dict):
+                        accumulated = dict(current.get("best_so_far") or {})
+                        accumulated.update(
+                            {
+                                key: value
+                                for key, value in best_update.items()
+                                if value is not None
+                            }
+                        )
+                        current["best_so_far"] = accumulated or None
+                    current["progress"] = progress_payload
 
         def run() -> None:
             with self._lock:
@@ -73,7 +86,11 @@ class OptimizationJobs:
                     job["error"] = {"type": "cancelled", "message": str(exc)}
                     job["progress"] = {
                         **dict(job.get("progress") or {}),
-                        "message": "Optimizasyon durduruldu; tamamlanan adaylar önbellekte kaldı",
+                        "message": (
+                            "Optimizasyon durduruldu; en iyi tamamlanan ara sonuç hazır"
+                            if job.get("best_so_far")
+                            else "Optimizasyon durduruldu; henüz gösterilebilir aday tamamlanmadı"
+                        ),
                     }
             except InputError as exc:
                 with self._lock:
