@@ -274,7 +274,7 @@ static QJsonObject runFoil(const QJsonObject &request)
     const double ncrit = numberOr(transition, "ncrit", 9.0);
     const double xtrTop = numberOr(transition, "xtr_top", 1.0);
     const double xtrBottom = numberOr(transition, "xtr_bottom", 1.0);
-    const int maxThreads = integerOr(request, "max_threads", 1);
+    const int maxThreads = std::max(1, integerOr(request, "max_threads", 1));
 
     std::vector<Polar *> polars;
     std::vector<std::unique_ptr<XFoilTask>> tasks;
@@ -349,6 +349,12 @@ static QJsonObject runFoil(const QJsonObject &request)
         {"ok", true},
         {"mode", "foil"},
         {"solver", solverInfo()},
+        {"threading", QJsonObject{
+            {"requested_cpu_budget", maxThreads},
+            {"case_workers", std::min(maxThreads, int(cases.size()))},
+            {"blas_threads_per_process", 1},
+            {"nested_parallelism_disabled", true},
+        }},
         {"foil_coordinate_points_used", 100},
         {"polars", outputPolars},
         {"artifacts", artifacts},
@@ -598,7 +604,7 @@ static QJsonObject runWing(const QJsonObject &request)
     const double alphaMin = number(alpha, "min_deg");
     const double alphaMax = number(alpha, "max_deg");
     const double alphaStep = number(alpha, "step_deg");
-    const int maxThreads = integerOr(request, "max_threads", 1);
+    const int maxThreads = std::max(1, integerOr(request, "max_threads", 1));
     const bool panelTelemetryRequested = request.value("panel_telemetry").toBool(false);
     const bool wingletActive = request.value("winglet_active").toBool(false);
     const bool thinSurfaces = request.value("thin_surfaces").toBool(true);
@@ -766,6 +772,12 @@ static QJsonObject runWing(const QJsonObject &request)
         {"ok", true},
         {"mode", "wing"},
         {"solver", solverInfo()},
+        {"threading", QJsonObject{
+            {"requested_cpu_budget", maxThreads},
+            {"panel_thread_limit", maxThreads},
+            {"blas_threads_per_process", 1},
+            {"nested_parallelism_disabled", true},
+        }},
         {"foil_coordinate_points_used", 100},
         {"mesh", QJsonObject{
             {"chordwise_panels", request.value("mesh").toObject().value("chordwise_panels")},
