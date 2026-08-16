@@ -493,6 +493,7 @@ function metric(label, value, unit) { return `<div class="metric"><small>${escap
 function renderComparison(result) {
   const winglet = result.winglet_comparison || {};
   const policy = result.wing_optimization?.selection_comparison || {};
+  const highestLd = result.highest_ld_comparison || result.wing_optimization?.highest_ld_candidate || {};
   const scalar = policy.scalar_only || {};
   const feasibility = policy.feasibility_first || {};
   const policyWing = feasibility.wing || result.wing;
@@ -507,6 +508,19 @@ function renderComparison(result) {
     policyHtml = `<div class="solver-help"><b>Fizibilite önceliği seçim karşılaştırması</b> · seçilen: ${escapeHtml(selectedState)} · yalnız skaler amaç: ${escapeHtml(scalarState)}${scalar.available ? "" : " · yüksek çözünürlüklü çıktı üretilemedi"}</div><table class="comparison-table"><thead><tr><th>Gösterge</th><th>Fizibilite öncelikli</th><th>Yalnız skaler amaç</th></tr></thead><tbody>${policyRow("Toplam amaç",feasibility.objective,scalar.objective,6)}${policyRow("Toplam sürükleme",policyWing.drag_n,scalarWing.drag_n,2,"N")}${policyRow("L/D",policyWing.ld,scalarWing.ld,1)}${policyRow("Açıklık",policyWing.geometry.span,scalarWing.geometry.span,3,"m")}${policyRow("Alan",policyWing.geometry.area,scalarWing.geometry.area,3,"m²")}${policyRow("Stall kullanımı",policyWing.stall_ratio,scalarWing.stall_ratio,3)}</tbody></table><div class="solver-help">Kök momenti her iki kanatta da yalnız rapor telemetrisidir; amaç, finalist sırası veya fizibilite kararına girmez.</div>`;
   } else if (policy.scalar_only) {
     policyHtml = `<div class="solver-help"><b>Skaler-puan alternatifi teslim edilemedi.</b> ${escapeHtml(scalar.error || "Yüksek çözünürlüklü son çözüm yakınsamadı.")}</div>`;
+  }
+  let highestLdHtml = "";
+  const highestLdWing = highestLd.wing;
+  if (highestLd.available && highestLdWing) {
+    const selectedWing = result.wing;
+    const highRow = (label, selectedValue, highestValue, digits=2, unit="") => `<tr><td>${escapeHtml(label)}</td><td>${fmt(selectedValue,digits)} ${unit}</td><td class="best">${fmt(highestValue,digits)} ${unit}</td></tr>`;
+    const equalityText = highestLd.same_as_selected
+      ? "Ana seçim zaten en yüksek L/D finalistidir; dosyalar yine ayrı highest-ld/ klasöründe verilir."
+      : "Bu aday ana amaç seçiminin yanında bağımsız karşılaştırma ve geometri çıktısı olarak tutulur.";
+    const feasibilityText = highestLd.constraint_feasible ? "sert kısıtları geçti" : `sert-kısıt ihlali ${fmt(highestLd.constraint_violation,4)}`;
+    highestLdHtml = `<div class="solver-help"><b>En yüksek L/D finalisti</b> · ${escapeHtml(highestLd.stage || "planar")} aşaması · ${escapeHtml(feasibilityText)} · ${escapeHtml(equalityText)}</div><table class="comparison-table"><thead><tr><th>Gösterge</th><th>Ana seçim</th><th>En yüksek L/D</th></tr></thead><tbody>${highRow("L/D",selectedWing.ld,highestLdWing.ld,1)}${highRow("Toplam sürükleme",selectedWing.drag_n,highestLdWing.drag_n,2,"N")}${highRow("Profil Cᴅ",selectedWing.cd_profile,highestLdWing.cd_profile,5)}${highRow("İndüklenmiş Cᴅ",selectedWing.cd_induced,highestLdWing.cd_induced,5)}${highRow("Açıklık",selectedWing.geometry.span,highestLdWing.geometry.span,3,"m")}${highRow("Kök chord",selectedWing.geometry.root_chord,highestLdWing.geometry.root_chord,3,"m")}${highRow("Taper",selectedWing.geometry.taper,highestLdWing.geometry.taper,3)}${highRow("Kök momenti (telemetri)",selectedWing.root_bending_moment_nm,highestLdWing.root_bending_moment_nm,1,"N·m")}</tbody></table>`;
+  } else if (highestLd.error) {
+    highestLdHtml = `<div class="solver-help"><b>En yüksek L/D finalisti teslim edilemedi.</b> ${escapeHtml(highestLd.error)}</div>`;
   }
   let primaryHtml;
   if (winglet.performed) {
@@ -523,7 +537,7 @@ function renderComparison(result) {
     const row = (label, optimum, baseline, digits=2, unit="") => `<tr><td>${label}</td><td class="best">${fmt(optimum,digits)} ${unit}</td><td>${fmt(baseline,digits)} ${unit}</td></tr>`;
     primaryHtml = `<table class="comparison-table"><thead><tr><th>Gösterge</th><th>Optimize</th><th>Dikdörtgen</th></tr></thead><tbody>${row("Toplam sürükleme",o.drag_n,b.drag_n,2,"N")}${row("L/D",o.ld,b.ld,1)}${row("Profil Cᴅ",o.cd_profile,b.cd_profile,4)}${row("İndüklenmiş Cᴅ",o.cd_induced,b.cd_induced,4)}${row("Span verimi",o.span_efficiency,b.span_efficiency,3)}${row("Kök eğilme momenti (telemetri)",o.root_bending_moment_nm,b.root_bending_moment_nm,1,"N·m")}</tbody></table>`;
   }
-  $("comparisonTable").innerHTML = `${primaryHtml}${policyHtml}`;
+  $("comparisonTable").innerHTML = `${primaryHtml}${highestLdHtml}${policyHtml}`;
 }
 
 function downloadLink(filename, contents, type, label) {
@@ -531,11 +545,34 @@ function downloadLink(filename, contents, type, label) {
   return `<a class="download-button" href="${url}" download="${escapeHtml(filename)}"><span>${escapeHtml(label)}</span><b>↓</b></a>`;
 }
 
-function base64DownloadLink(filename, encoded, type, label) {
+function base64ObjectUrl(encoded, type) {
   const raw = atob(encoded); const bytes = new Uint8Array(raw.length);
   for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-  const url = URL.createObjectURL(new Blob([bytes], { type }));
+  return URL.createObjectURL(new Blob([bytes], { type }));
+}
+
+function base64DownloadLink(filename, encoded, type, label) {
+  const url = base64ObjectUrl(encoded, type);
   return `<a class="download-button bundle-button" href="${url}" download="${escapeHtml(filename)}"><span>${escapeHtml(label)}</span><b>↓</b></a>`;
+}
+
+function triggerObjectUrlDownload(filename, url) {
+  const anchor = document.createElement("a");
+  anchor.href = url; anchor.download = filename; anchor.hidden = true;
+  document.body.appendChild(anchor); anchor.click(); anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+function autoDownloadResult(result) {
+  const ex = result.exports || {};
+  const filename = ex.flow5_bundle_filename || ex.foil_bundle_filename;
+  const encoded = ex.flow5_bundle_base64 || ex.foil_bundle_base64;
+  if (!filename || !encoded) return false;
+  const renderedLink = Array.from($("downloads").querySelectorAll("a[download]"))
+    .find((anchor) => anchor.getAttribute("download") === filename);
+  if (renderedLink) { renderedLink.click(); return true; }
+  triggerObjectUrlDownload(filename, base64ObjectUrl(encoded, "application/zip"));
+  return true;
 }
 
 function renderXfoil(result) {
@@ -604,7 +641,18 @@ function renderXfoil(result) {
       row("Checkpoint · foil", foilCheckpoint.resumed ? `${foilCheckpoint.evaluations_restored} değerlendirmeden sürdü` : foilCheckpoint.enabled ? "etkin · yeni koşu" : "kapalı"),
       row("Checkpoint · kanat", wingCheckpoint.resumed ? `${wingCheckpoint.evaluations_restored} değerlendirmeden sürdü` : wingCheckpoint.enabled ? "etkin · yeni koşu" : "kapalı"),
       row("Multi-seed", stability.enabled ? `${stability.runs_completed}/${stability.runs_requested} · CV %${fmt(stability.objective_cv_percent,2)}` : "1 koşu"),
-      row("flow5 içi çekirdek", String(result.solver_run.flow5_threads)), row("Referans α", fmt(cruise.alpha_deg,2), "°"),
+      row(
+        "Toplam CPU bütçesi",
+        result.solver_run.flow5_threads_requested != null
+          && result.solver_run.flow5_threads_requested !== result.solver_run.flow5_threads
+          ? `${result.solver_run.flow5_threads} etkin · ${result.solver_run.flow5_threads_requested} istendi`
+          : `${result.solver_run.flow5_threads} iş parçacığı`,
+      ),
+      row(
+        "İç sayısal havuzlar",
+        result.solver_run.cpu_budget_enforced ? "sınır etkin · süreç başına 1" : "çözücü varsayılanı",
+      ),
+      row("Referans α", fmt(cruise.alpha_deg,2), "°"),
       row("Referans CL", fmt(cruise.cl,4)), row("Referans CD", fmt(cruise.cd,5)), row("2B L/D", fmt(cruise.ld,1)),
     ];
     $("xfoilSummary").innerHTML = `<table class="comparison-table validation-table"><tbody>${summaryRows.join("")}</tbody></table>`;
@@ -927,7 +975,100 @@ function configureExportPanel(foilOnly) {
     : "<li><b>aeropt-optimized.fl5</b> dosyasını flow5 7.57'de açın</li><li>Foil ve 3B polarları Data ağacında inceleyin</li><li>DAT/XML/OBJ dosyalarını bağımsız geometri aktarımı için kullanın</li>";
 }
 
+function prepareCompletedResult() {
+  $("resultEyebrow").textContent = "OPTİMUM TASARIM";
+  $("polarPanel").classList.remove("hidden");
+}
+
+function renderCancelledBest(best = {}) {
+  const wingPreview = best.wing?.wing ? best.wing : null;
+  const foilPreview = best.foil?.airfoil ? best.foil : wingPreview;
+  if (!foilPreview?.airfoil || !foilPreview?.airfoil_coordinates?.length) return false;
+
+  lastResult = null;
+  const hasWing = Boolean(wingPreview);
+  const hasPolar = Boolean(foilPreview.polar?.length);
+  const hasLoad = Boolean(wingPreview?.wing?.distribution?.length);
+  setWingResultVisibility(hasWing);
+  ["xfoilPanel", "engineeringPanel", "cavitationPanel", "validationPanel", "diagnosticPanel", "paretoPanel", "stabilityPanel", "budgetPanel", "comparisonPanel", "historyPanel"]
+    .forEach((id) => $(id).classList.add("hidden"));
+  $("polarPanel").classList.toggle("hidden", !hasPolar);
+  $("loadPanel").classList.toggle("hidden", !hasLoad);
+  $("visualGrid").classList.toggle("single-column", !hasWing);
+  $("chartGrid").classList.toggle("single-column", !(hasPolar && hasLoad));
+
+  $("resultEyebrow").textContent = "YARIDA DURDURULDU";
+  $("resultTitle").textContent = foilPreview.airfoil.name || "En iyi ara sonuç";
+  $("resultSubtitle").textContent = hasWing
+    ? `En iyi tamamlanan kanat adayı · ${wingPreview.evaluations || 0} kanat değerlendirmesi · final doğrulaması yapılmadı`
+    : `En iyi tamamlanan profil adayı · ${foilPreview.evaluations || 0} profil değerlendirmesi · kanat aşamasına ulaşılmadı`;
+  $("feasibilityBadge").textContent = "Ara sonuç";
+  $("feasibilityBadge").classList.add("review");
+
+  if (hasWing) {
+    const wing = wingPreview.wing, geometry = wing.geometry;
+    $("metricGrid").innerHTML = [
+      metric("Taşıma", fmt(wing.lift_n,1), "N"),
+      metric("Sürükleme", fmt(wing.drag_n,2), "N"),
+      metric("L / D", fmt(wing.ld,1), ""),
+      metric("Açıklık", fmt(geometry.span,3), "m"),
+      metric("Kök chord", fmt(geometry.root_chord,3), "m"),
+      metric("Ara amaç", fmt(wingPreview.objective,6), ""),
+    ].join("");
+    renderPlanform({
+      wing,
+      airfoil_coordinates: wingPreview.airfoil_coordinates,
+    });
+    if (hasLoad) svgLineChart($("loadChart"), wing.distribution, "y_m", "lift_n_per_m", { yDigits:1, xDigits:2, label:"Ara kanat yük dağılımı" });
+  } else {
+    const performance = foilPreview.performance || {};
+    $("metricGrid").innerHTML = [
+      metric("Hedef CL", fmt(performance.target_cl,4), ""),
+      metric("Referans CL", fmt(performance.cl,4), ""),
+      metric("Referans CD", fmt(performance.cd,5), ""),
+      metric("2B L / D", fmt(performance.ld,1), ""),
+      metric("Ara amaç", fmt(foilPreview.objective,6), ""),
+    ].join("");
+  }
+
+  renderFoil({
+    airfoil: foilPreview.airfoil,
+    airfoil_coordinates: foilPreview.airfoil_coordinates,
+  });
+  $("foilTag").textContent = `${foilPreview.airfoil.family || "Profil"} · ARA ADAY`;
+  $("reTag").textContent = "ARA FLOW5/XFOIL";
+  if (hasPolar) {
+    svgLineChart($("polarChart"), foilPreview.polar, "alpha_deg", "cl", {
+      referenceX: foilPreview.performance?.alpha_deg,
+      label: "Ara profil polar grafiği",
+    });
+  }
+
+  const mismatchNote = hasWing && best.foil
+    ? "Profil kartı en son tamamlanan foil adayını; kanat kartı ise en iyi kanat adayında kullanılan profili gösterir. Bunlar bağlı döngünün farklı tamamlanmış aşamalarından gelebilir."
+    : "";
+  $("insights").innerHTML = [
+    `<div class="insight warn"><i></i><div><strong>Bu bir ara sonuçtur</strong><p>Yalnız tamamlanmış gerçek çözücü adayları kullanıldı; finalist, ince ağ, doğrulama ve nihai CAD aşamaları tamamlanmış sayılmaz.</p></div></div>`,
+    mismatchNote ? `<div class="insight info"><i></i><div><strong>Profil–kanat eşleşmesi</strong><p>${escapeHtml(mismatchNote)}</p></div></div>` : "",
+  ].filter(Boolean).join("");
+
+  const partialJson = JSON.stringify({ status:"cancelled", best_so_far:best }, null, 2);
+  const datText = foilPreview.airfoil_dat || wingPreview?.airfoil_dat;
+  $("downloads").innerHTML = [
+    datText ? downloadLink(`${foilPreview.airfoil.name || "aeropt-partial-airfoil"}.dat`, datText, "text/plain", "Ara profil · DAT") : "",
+    downloadLink("aeropt-best-so-far.json", partialJson, "application/json", "Ara sonuç · JSON"),
+  ].filter(Boolean).join("");
+  const exportPanel = document.querySelector(".export-panel");
+  exportPanel.querySelector("h3").textContent = "Ara sonuç dosyaları";
+  exportPanel.querySelector("p").textContent = "Durdurma anına kadar tamamlanmış en iyi adayların profil ve geometri özeti.";
+  exportPanel.querySelector("ol").innerHTML = "<li>Ara DAT profil koordinatlarını içerir</li><li>JSON en iyi profil ve kanat adayını birlikte saklar</li><li>Nihai STEP/FL5/ZIP yalnız normal tamamlanmada üretilir</li>";
+  $("methodText").textContent = "Ara adaylar gerçek flow5 çözümünden gelir; ancak nihai finalist ve ağ yakınsama denetiminden geçmemiştir.";
+  showState("resultState");
+  return true;
+}
+
 function renderFoilOnlyResult(result) {
+  prepareCompletedResult();
   lastResult = result;
   setWingResultVisibility(false);
   configureExportPanel(true);
@@ -971,6 +1112,7 @@ function renderFoilOnlyResult(result) {
     ex.airfoil_dat ? downloadLink(ex.airfoil_filename, ex.airfoil_dat, "text/plain", "Airfoil · DAT") : "",
     ex.xfoil_polar_csv ? downloadLink(ex.xfoil_polar_filename, ex.xfoil_polar_csv, "text/csv", "flow5/XFoil polar · CSV") : "",
     ex.project_json ? downloadLink(ex.project_filename, ex.project_json, "application/json", "Profil projesi · JSON") : "",
+    ex.foil_bundle_base64 ? base64DownloadLink(ex.foil_bundle_filename, ex.foil_bundle_base64, "application/zip", "Tüm profil dosyaları · ZIP") : "",
   ].filter(Boolean).join("");
   $("methodText").textContent = `${result.model.airfoil}. Kanat geometrisi, yapı ve hidrofoil kontrolleri bu çalışmada yürütülmedi.`;
   rememberAirfoilResult(result);
@@ -979,6 +1121,7 @@ function renderFoilOnlyResult(result) {
 
 function renderResult(result) {
   if (result.workflow_mode === "foil_only") { renderFoilOnlyResult(result); return; }
+  prepareCompletedResult();
   setWingResultVisibility(true);
   configureExportPanel(false);
   lastResult = result; const wing = result.wing, g = wing.geometry, f = result.airfoil;
@@ -1013,6 +1156,16 @@ function renderResult(result) {
   $("insights").innerHTML = result.insights.map((item) => `<div class="insight ${escapeHtml(item.level)}"><i></i><div><strong>${escapeHtml(item.title)}</strong><p>${escapeHtml(item.text)}</p></div></div>`).join("");
   const ex = result.exports;
   const scalarEx = ex.scalar_only_alternative || {};
+  const highestLdEx = ex.highest_ld || {};
+  const highestLdDownloads = highestLdEx.available ? [
+    highestLdEx.plane_xml ? downloadLink(highestLdEx.plane_filename, highestLdEx.plane_xml, "application/xml", "En yüksek L/D · XML") : "",
+    highestLdEx.analysis_xml ? downloadLink(highestLdEx.analysis_filename, highestLdEx.analysis_xml, "application/xml", "En yüksek L/D · analiz XML") : "",
+    highestLdEx.wing_obj ? downloadLink(highestLdEx.wing_obj_filename, highestLdEx.wing_obj, "model/obj", "En yüksek L/D · OBJ") : "",
+    highestLdEx.wing_step_base64 ? base64DownloadLink(highestLdEx.wing_step_filename, highestLdEx.wing_step_base64, "model/step", "En yüksek L/D · STEP") : "",
+    highestLdEx.results_csv ? downloadLink(highestLdEx.results_filename, highestLdEx.results_csv, "text/csv", "En yüksek L/D · CSV") : "",
+    highestLdEx.summary_json ? downloadLink(highestLdEx.summary_filename, highestLdEx.summary_json, "application/json", "En yüksek L/D · özet JSON") : "",
+    highestLdEx.flow5_project_base64 ? base64DownloadLink(highestLdEx.flow5_project_filename, highestLdEx.flow5_project_base64, "application/octet-stream", "En yüksek L/D · FL5") : "",
+  ] : [];
   const scalarDownloads = !scalarEx.same_as_feasibility_first ? [
     scalarEx.wing_obj ? downloadLink(scalarEx.wing_obj_filename, scalarEx.wing_obj, "model/obj", "Skaler alternatif · OBJ") : "",
     scalarEx.wing_step_base64 ? base64DownloadLink(scalarEx.wing_step_filename, scalarEx.wing_step_base64, "model/step", "Skaler alternatif · STEP") : "",
@@ -1034,6 +1187,7 @@ function renderResult(result) {
     ex.diagnostics_json ? downloadLink(ex.diagnostics_filename, ex.diagnostics_json, "application/json", "Teşhis · JSON") : "",
     ex.cavitation_json ? downloadLink(ex.cavitation_filename, ex.cavitation_json, "application/json", "Kavitasyon haritası · JSON") : "",
     ex.flow5_project_base64 ? base64DownloadLink(ex.flow5_project_filename, ex.flow5_project_base64, "application/octet-stream", "Çözümlenmiş flow5 · FL5") : "",
+    ...highestLdDownloads,
     ...scalarDownloads,
     ...(ex.section_airfoils || []).map((item) => downloadLink(item.filename, item.airfoil_dat, "text/plain", `${item.station} airfoil · DAT`)),
     base64DownloadLink(ex.flow5_bundle_filename, ex.flow5_bundle_base64, "application/zip", "Tüm flow5 paketi · ZIP"),
@@ -1061,14 +1215,18 @@ async function optimize(event) {
       updateProgress(state.progress);
       if (state.status === "completed") {
         const result = state.result;
-        stopLoading(); renderResult(result); return;
+        stopLoading(); renderResult(result); autoDownloadResult(result); return;
       }
       if (state.status === "failed") {
         const detail = state.error?.detail || state.error?.message || "Optimizasyon tamamlanamadı.";
         const diagnosis = state.error?.diagnosis;
         throw new Error(diagnosis ? `${detail} · Teşhis: ${diagnosis.title}. ${diagnosis.recommendation}` : detail);
       }
-      if (state.status === "cancelled") throw new Error("Optimizasyon durduruldu. Tamamlanan adaylar önbellekte; aynı ayarlarla yeniden başlatırsanız kaldığı işi tekrar kullanır.");
+      if (state.status === "cancelled") {
+        stopLoading();
+        if (renderCancelledBest(state.best_so_far || {})) return;
+        throw new Error("Optimizasyon, gösterilebilir bir aday tamamlanmadan durduruldu. Aynı ayarlarla yeniden başlatırsanız önbellekteki çözümler tekrar kullanılır.");
+      }
     }
   } catch (error) {
     stopLoading(); $("errorMessage").textContent = error.message || String(error); showState("errorState");

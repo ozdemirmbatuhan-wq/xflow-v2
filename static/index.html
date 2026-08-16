@@ -76,6 +76,7 @@
 
           <section id="wingEnvelopeSection" class="form-section">
             <div class="section-heading"><span class="step">02</span><div><h2>Boyut zarfı</h2><p>Kanadın fiziksel sınırları</p></div></div>
+            <p class="solver-help"><strong>Bir parametreyi sabitlemek için</strong> Min ve Max alanlarına aynı değeri girin. Örneğin açıklık için 1,75 / 1,75 ve kök chord için 0,31 / 0,31 girildiğinde optimizer bu değerleri değiştirmez.</p>
             <div class="range-block">
               <span class="range-label">Tam açıklık <em>m</em></span>
               <div class="range-pair"><label>Min<input id="spanMin" type="number" min="0.02" step="any" value="1"></label><span>—</span><label>Max<input id="spanMax" type="number" min="0.02" step="any" value="3"></label></div>
@@ -187,12 +188,13 @@
                   <div class="field"><label for="flow5FinalMethod">Son doğrulama</label><select id="flow5FinalMethod"><option value="VLM2">VLM2</option><option value="QUADS">QUADS</option><option value="TRIUNIFORM" selected>TRIUNIFORM</option><option value="TRILINEAR">TRILINEAR</option></select></div>
                   <div class="field"><label for="flow5Finalists">Panel finalisti</label><input id="flow5Finalists" type="number" min="1" max="8" step="1" value="3"></div>
                   <div class="field"><label for="flow5MinImprovement">E818 min. iyileşme <em>%</em></label><input id="flow5MinImprovement" type="number" min="0" max="20" step="any" value="1"></div>
-                  <div class="field"><label for="flow5Threads">flow5 çekirdeği</label><input id="flow5Threads" type="number" min="1" max="64" step="1" value="16"></div>
+                  <div class="field"><label for="flow5Threads">Toplam CPU bütçesi <em>iş parçacığı</em></label><input id="flow5Threads" type="number" min="1" max="64" step="1" value="16"></div>
                   <div class="field"><label for="flow5SearchStep">Arama α adımı <em>°</em></label><input id="flow5SearchStep" type="number" min="0.25" max="5" step="any" value="2"></div>
                   <div class="field"><label for="flow5FinalStep">Final α adımı <em>°</em></label><input id="flow5FinalStep" type="number" min="0.1" max="2" step="any" value="0.5"></div>
                   <div class="field"><label for="flow5Ncrit">XFoil Ncrit</label><input id="flow5Ncrit" type="number" min="1" max="20" step="any" value="9"></div>
                   <div class="field"><label for="flow5Timeout">Aday zaman aşımı <em>s · üst sınır yok</em></label><input id="flow5Timeout" type="number" min="30" step="1" value="900"></div>
                 </div>
+                <p class="solver-help"><strong>CPU sınırı:</strong> Profil aday süreçleri, flow5 vaka işçileri ve NumPy/SciPy sayısal iş parçacıkları birlikte bu bütçeyi aşmayacak şekilde sınırlandırılır. Bilgisayarı rahat bırakmak için mantıksal çekirdek sayısından düşük bir değer seçin.</p>
                 <div class="field-grid two">
                   <div class="field"><label for="flow5XtrTop">Üst geçiş x/c</label><input id="flow5XtrTop" type="number" min="0.01" max="1" step="any" value="1"></div>
                   <div class="field"><label for="flow5XtrBottom">Alt geçiş x/c</label><input id="flow5XtrBottom" type="number" min="0.01" max="1" step="any" value="1"></div>
@@ -348,7 +350,7 @@
 
         <div id="resultState" class="result-state hidden">
           <div class="result-head">
-            <div><span class="eyebrow">OPTİMUM TASARIM</span><h2 id="resultTitle">AeroOpt</h2><p id="resultSubtitle"></p></div>
+            <div><span id="resultEyebrow" class="eyebrow">OPTİMUM TASARIM</span><h2 id="resultTitle">AeroOpt</h2><p id="resultSubtitle"></p></div>
             <span id="feasibilityBadge" class="status-badge">Fizibil</span>
           </div>
           <div id="metricGrid" class="metric-grid"></div>
@@ -359,7 +361,7 @@
           </div>
 
           <div id="chartGrid" class="chart-grid">
-            <article class="panel"><header><div><span class="panel-kicker">2B POLAR</span><h3>C<sub>L</sub> — α</h3></div><span id="reTag" class="mono-tag"></span></header><div id="polarChart" class="line-chart"></div></article>
+            <article id="polarPanel" class="panel"><header><div><span class="panel-kicker">2B POLAR</span><h3>C<sub>L</sub> — α</h3></div><span id="reTag" class="mono-tag"></span></header><div id="polarChart" class="line-chart"></div></article>
             <article id="loadPanel" class="panel"><header><div><span class="panel-kicker">SPANWISE</span><h3>Yük dağılımı</h3></div><span class="mono-tag">YARIM KANAT</span></header><div id="loadChart" class="line-chart"></div></article>
           </div>
 
@@ -398,7 +400,7 @@
 
           <div class="lower-grid">
             <article class="panel"><header><div><span class="panel-kicker">MÜHENDİSLİK YORUMU</span><h3>Geometri neden böyle?</h3></div></header><div id="insights" class="insights"></div></article>
-            <article class="panel export-panel"><header><div><span class="panel-kicker">DIŞA AKTAR</span><h3>Çözümlenmiş flow5 paketi</h3></div></header><p>ZIP; DAT, plane/analysis XML, OBJ, polarlar, sonuçlar ve gerçek çözümlenmiş `.fl5` projesini birlikte taşır.</p><div id="downloads" class="downloads"></div><ol><li><b>aeropt-optimized.fl5</b> dosyasını flow5 7.57'de açın</li><li>Foil ve 3B polarları Data ağacında inceleyin</li><li>DAT/XML/OBJ dosyalarını bağımsız geometri aktarımı için kullanın</li></ol></article>
+            <article class="panel export-panel"><header><div><span class="panel-kicker">DIŞA AKTAR</span><h3>Çözümlenmiş flow5 paketi</h3></div></header><p>ZIP; DAT, plane/analysis XML, OBJ, metre birimli STEP, sonuçlar ve çözümlenmiş `.fl5` projesini birlikte taşır. En yüksek L/D finalisti ayrıca <b>highest-ld/</b> klasöründedir.</p><div id="downloads" class="downloads"></div><ol><li><b>aeropt-optimized.fl5</b> dosyasını flow5 7.57'de açın</li><li><b>aeropt-wing.step</b> dosyasını CAD/FEA aracına aktarın</li><li><b>highest-ld/</b> içindeki kanadı ana seçimle karşılaştırın</li><li>DAT/XML/OBJ dosyalarını bağımsız geometri aktarımı için kullanın</li></ol></article>
           </div>
 
           <div class="method-note"><strong>Model sınırı</strong><span id="methodText"></span></div>
