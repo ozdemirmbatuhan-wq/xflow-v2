@@ -69,6 +69,11 @@ class PipelineTests(unittest.TestCase):
             scalar_only_results_csv_text="scalar\n",
             scalar_only_flow5_project_bytes=b"SCALAR FL5",
             scalar_only_same_as_primary=False,
+            highest_ld_files={
+                "aeropt-highest-ld-wing.obj": "o highest\n",
+                "aeropt-highest-ld-wing.step": b"HIGHEST STEP",
+                "aeropt-highest-ld-optimized.fl5": b"HIGHEST FL5",
+            },
         )
         with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
             self.assertEqual(archive.read("aeropt-wing.step"), b"PRIMARY STEP")
@@ -77,6 +82,14 @@ class PipelineTests(unittest.TestCase):
             )
             self.assertEqual(
                 archive.read("aeropt-scalar-only-optimized.fl5"), b"SCALAR FL5"
+            )
+            self.assertEqual(
+                archive.read("highest-ld/aeropt-highest-ld-wing.step"),
+                b"HIGHEST STEP",
+            )
+            self.assertEqual(
+                archive.read("highest-ld/aeropt-highest-ld-optimized.fl5"),
+                b"HIGHEST FL5",
             )
 
     def test_rejects_supersonic_or_transonic_request(self):
@@ -159,6 +172,32 @@ class PipelineTests(unittest.TestCase):
                     "solver": {"flow5_timeout_seconds": 29},
                 }
             )
+
+    def test_flow5_cpu_budget_is_integer_capped_and_applied_to_python_blas(self):
+        native_result = {"solver_run": {}}
+        with (
+            patch("aeropt.pipeline.resolve_flow5_runner_path", return_value=__file__),
+            patch(
+                "aeropt.pipeline.run_flow5_native_design",
+                return_value=native_result,
+            ) as native_run,
+            patch("aeropt.pipeline.os.cpu_count", return_value=4),
+            patch("aeropt.pipeline.threadpool_limits") as limits,
+        ):
+            result = run_design(
+                {
+                    "workflow": {"mode": "foil_only"},
+                    "solver": {"flow5_threads": 12},
+                }
+            )
+
+        self.assertEqual(native_run.call_args.kwargs["settings"].threads, 4)
+        limits.assert_called_once_with(limits=4, user_api="blas")
+        self.assertEqual(result["solver_run"]["flow5_threads"], 4)
+        self.assertEqual(result["solver_run"]["flow5_threads_requested"], 12)
+
+        with self.assertRaisesRegex(InputError, "tam sayı"):
+            run_design({"solver": {"flow5_threads": 2.5}})
 
     def test_winglet_naca_code_is_normalized_only_when_stage_is_enabled(self):
         with (

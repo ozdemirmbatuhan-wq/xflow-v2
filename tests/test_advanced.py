@@ -474,6 +474,46 @@ class AdvancedAnalysisTests(unittest.TestCase):
         self.assertEqual(report["evaluated_finalists"], 2)
         self.assertTrue(report["scalar_only_diagnostic_added"])
 
+    def test_highest_feasible_ld_candidate_is_added_outside_finalist_quota(self):
+        def candidate(score: float, stall: float, ld: float) -> WingCandidate:
+            return WingCandidate(
+                self.geometry,
+                score=score,
+                response={"ok": True},
+                conditions=[
+                    {
+                        "speed_m_s": 18.0,
+                        "drag_n": 40.0 / ld,
+                        "ld": ld,
+                        "stall_ratio": stall,
+                        "point": {
+                            "root_bending_moment_nm": 10.0,
+                            "out_of_mesh": False,
+                            "viscous_converged": True,
+                        },
+                    }
+                ],
+            )
+
+        candidates = [
+            candidate(0.10, 0.80, 25.0),
+            candidate(0.20, 0.82, 45.0),
+            candidate(0.05, 1.20, 60.0),
+        ]
+        indices, report = select_wing_finalist_indices(
+            candidates,
+            1,
+            ["mean_drag_n", "worst_stall_ratio"],
+            optimizer="nsga2",
+            reference_speed_m_s=18.0,
+        )
+        self.assertEqual(indices, [0, 2, 1])
+        self.assertEqual(report["highest_ld_search_index"], 1)
+        self.assertTrue(report["highest_ld_search_feasible"])
+        self.assertTrue(report["highest_ld_diagnostic_added"])
+        self.assertEqual(report["requested_finalists"], 1)
+        self.assertEqual(report["evaluated_finalists"], 3)
+
     def test_budget_controller_escalates_then_stops_when_objectives_stabilize(self):
         controller = BudgetEscalationController(
             8,

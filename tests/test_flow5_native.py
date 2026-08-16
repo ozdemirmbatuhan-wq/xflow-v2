@@ -13,7 +13,12 @@ import zipfile
 from xml.etree import ElementTree as ET
 
 from aeropt.pipeline import InputError, run_design
-from aeropt.flow5 import Flow5Mesh, Flow5Runner, _hidden_subprocess_kwargs
+from aeropt.flow5 import (
+    Flow5Mesh,
+    Flow5Runner,
+    _bounded_solver_environment,
+    _hidden_subprocess_kwargs,
+)
 from aeropt.flow5_pipeline import _sample_speeds
 
 
@@ -23,6 +28,7 @@ FAKE_RUNNER = Path(__file__).with_name("fake_flow5_runner.py").resolve()
 class Flow5NativePipelineTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.progress_events = []
         old_value = os.environ.get("AEROPT_ALLOW_TEST_DOUBLE")
         os.environ["AEROPT_ALLOW_TEST_DOUBLE"] = "1"
         try:
@@ -47,7 +53,8 @@ class Flow5NativePipelineTests(unittest.TestCase):
                         "flow5_alpha_step_final_deg": 1.0,
                         "seed": 9,
                     },
-                }
+                },
+                progress_callback=cls.progress_events.append,
             )
         finally:
             if old_value is None:
@@ -64,6 +71,11 @@ class Flow5NativePipelineTests(unittest.TestCase):
         self.assertEqual(len(result["foil_polars"]), 3)
         self.assertEqual(len(result["wing_cases"]), 3)
         self.assertGreater(result["wing"]["ld"], 5.0)
+        self.assertTrue(result["highest_ld_comparison"]["available"])
+        self.assertGreaterEqual(
+            result["highest_ld_comparison"]["wing"]["ld"],
+            result["wing"]["ld"] - 1.0e-12,
+        )
         self.assertTrue(result["wing_optimization"]["mesh_convergence"]["passed"])
         self.assertTrue(
             result["wing_optimization"]["solver_telemetry"][
@@ -111,6 +123,14 @@ class Flow5NativePipelineTests(unittest.TestCase):
         self.assertIn(b"END-ISO-10303-21;", step)
         self.assertIn(b"SI_UNIT($,.METRE.)", step.replace(b" ", b""))
         self.assertIn(b"5 sections x 160 points", step)
+        highest_ld_exports = exports["highest_ld"]
+        self.assertTrue(highest_ld_exports["available"])
+        self.assertTrue(highest_ld_exports["wing_obj"])
+        self.assertTrue(highest_ld_exports["wing_step_base64"])
+        self.assertEqual(
+            base64.b64decode(highest_ld_exports["flow5_project_base64"]),
+            b"FLOW5_TEST_DOUBLE_PROJECT\x00",
+        )
         bundle = base64.b64decode(exports["flow5_bundle_base64"])
         with zipfile.ZipFile(io.BytesIO(bundle)) as archive:
             self.assertIn("aeropt-optimized.fl5", archive.namelist())
@@ -119,6 +139,21 @@ class Flow5NativePipelineTests(unittest.TestCase):
             self.assertIn("aeropt-pareto.json", archive.namelist())
             self.assertIn("aeropt-diagnostics.json", archive.namelist())
             self.assertIn("aeropt-wing.step", archive.namelist())
+            self.assertIn(
+                "highest-ld/aeropt-highest-ld-wing.obj", archive.namelist()
+            )
+            self.assertIn(
+                "highest-ld/aeropt-highest-ld-wing.step", archive.namelist()
+            )
+            self.assertIn(
+                "highest-ld/aeropt-highest-ld-wing.xml", archive.namelist()
+            )
+            self.assertIn(
+                "highest-ld/aeropt-highest-ld-summary.json", archive.namelist()
+            )
+            self.assertIn(
+                "highest-ld/aeropt-highest-ld-optimized.fl5", archive.namelist()
+            )
             self.assertNotIn("aeropt-cavitation.json", archive.namelist())
             self.assertEqual(
                 archive.read("aeropt-optimized.fl5"), b"FLOW5_TEST_DOUBLE_PROJECT\x00"
@@ -152,14 +187,61 @@ class Flow5NativePipelineTests(unittest.TestCase):
         if not comparison["scalar_only"]["same_as_feasibility_first"]:
             self.assertTrue(scalar_exports["wing_step_base64"])
             self.assertTrue(scalar_exports["wing_obj"])
+        highest_ld = self.result["wing_optimization"]["highest_ld_candidate"]
+        self.assertTrue(highest_ld["available"])
+        self.assertTrue(highest_ld["constraint_feasible"])
+        self.assertIn(highest_ld["stage"], {"planar", "winglet"})
+        self.assertEqual(
+            highest_ld["wing"], self.result["highest_ld_comparison"]["wing"]
+        )
 
     def test_sixteen_core_budget_avoids_outer_inner_oversubscription(self):
         foil_meta = self.result["airfoil_optimization"]
+        effective_budget = self.result["solver_run"]["flow5_threads"]
         self.assertLessEqual(
-            foil_meta["outer_parallel_runners"] * foil_meta["threads_per_runner"], 16
+            foil_meta["outer_parallel_runners"] * foil_meta["threads_per_runner"],
+            effective_budget,
         )
-        self.assertEqual(self.result["wing_optimization"]["threads_inside_flow5"], 16)
+        self.assertLessEqual(effective_budget, 16)
+        self.assertEqual(
+            self.result["wing_optimization"]["threads_inside_flow5"],
+            effective_budget,
+        )
         self.assertTrue(self.result["wing_optimization"]["oversubscription_prevented"])
+        self.assertTrue(self.result["solver_run"]["cpu_budget_enforced"])
+        self.assertEqual(
+            self.result["solver_run"]["runner_blas_threads_per_process"], 1
+        )
+
+    def test_progress_reports_serializable_best_foil_and_wing_snapshots(self):
+        components = {
+            key: value
+            for event in self.progress_events
+            for key, value in event.get("best_so_far", {}).items()
+        }
+        self.assertIn("foil", components)
+        self.assertIn("wing", components)
+        self.assertTrue(components["foil"]["airfoil_coordinates"])
+        self.assertIn("airfoil_dat", components["foil"])
+        self.assertTrue(components["wing"]["wing"]["geometry"])
+        self.assertGreater(components["wing"]["wing"]["ld"], 0.0)
+        json.dumps(components, allow_nan=False)
+
+    def test_native_child_environment_disables_nested_numeric_thread_pools(self):
+        with patch.dict(os.environ, {"OPENBLAS_NUM_THREADS": "99"}, clear=False):
+            environment = _bounded_solver_environment({"max_threads": 3})
+            self.assertEqual(os.environ["OPENBLAS_NUM_THREADS"], "99")
+        self.assertEqual(environment["AEROPT_CPU_BUDGET"], "3")
+        for key in (
+            "OMP_NUM_THREADS",
+            "OMP_THREAD_LIMIT",
+            "MKL_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "BLIS_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+        ):
+            self.assertEqual(environment[key], "1")
 
     def test_validation_pareto_diagnostics_and_resume_metadata_are_exported(self):
         validation = self.result["validation_report"]
@@ -256,6 +338,8 @@ class Flow5NativePipelineTests(unittest.TestCase):
         self.assertIn("OpenCascade STEP loft did not produce a closed solid", source)
         self.assertIn("normalizeStepMetreUnit", source)
         self.assertIn('"wing_step"', source)
+        self.assertIn('"nested_parallelism_disabled"', source)
+        self.assertIn('"blas_threads_per_process"', source)
 
     def test_foil_only_result_can_feed_a_fixed_foil_wing_optimization(self):
         common = {
@@ -289,6 +373,14 @@ class Flow5NativePipelineTests(unittest.TestCase):
             self.assertNotIn("wing", foil_result)
             self.assertIn("airfoil_dat", foil_result["exports"])
             self.assertEqual(foil_result["solver_run"]["wing_optimizer"], "skipped")
+            foil_bundle = base64.b64decode(
+                foil_result["exports"]["foil_bundle_base64"]
+            )
+            with zipfile.ZipFile(io.BytesIO(foil_bundle)) as archive:
+                self.assertIn("README-foil.txt", archive.namelist())
+                self.assertIn("aeropt-airfoil.dat", archive.namelist())
+                self.assertIn("aeropt-foil-project.json", archive.namelist())
+                self.assertIn("flow5-xfoil-polar.csv", archive.namelist())
 
             wing_request = {
                 **common,
@@ -314,6 +406,63 @@ class Flow5NativePipelineTests(unittest.TestCase):
         self.assertEqual(wing_result["airfoil_optimization"]["candidates_evaluated"], 1)
         self.assertEqual(wing_result["solver_run"]["foil_optimizer"], "skipped_fixed_airfoil")
         self.assertFalse(wing_result["coupled_design"]["enabled"])
+
+    def test_equal_minimum_and_maximum_values_fix_wing_dimensions(self):
+        request = {
+            "workflow": {"mode": "wing_only"},
+            "flow": {
+                "speed_m_s": 18.0,
+                "speed_min_m_s": 18.0,
+                "speed_max_m_s": 18.0,
+                "speed_samples": 1,
+                "target_lift_n": 40.0,
+            },
+            "airfoil": {"baseline_profile": "e818"},
+            "wing": {
+                "span_min_m": 1.75,
+                "span_max_m": 1.75,
+                "root_chord_min_m": 0.31,
+                "root_chord_max_m": 0.31,
+                "taper_min": 0.62,
+                "taper_max": 0.62,
+                "sweep_min_deg": 4.0,
+                "sweep_max_deg": 4.0,
+                "tip_twist_min_deg": -1.5,
+                "tip_twist_max_deg": -1.5,
+                "multi_section_geometry_enabled": False,
+            },
+            "solver": {
+                "airfoil_strategy": "flow5_native",
+                "flow5_runner_path": str(FAKE_RUNNER),
+                "flow5_threads": 2,
+                "flow5_wing_candidate_budget": 8,
+                "flow5_finalists": 1,
+                "flow5_alpha_step_search_deg": 2.0,
+                "flow5_alpha_step_final_deg": 1.0,
+                "flow5_budget_escalation_enabled": False,
+                "flow5_surrogate_enabled": False,
+                "flow5_mesh_convergence_enabled": False,
+                "flow5_checkpoint_enabled": False,
+                "seed": 23,
+            },
+            "hydro": {"enabled": False},
+        }
+        old_value = os.environ.get("AEROPT_ALLOW_TEST_DOUBLE")
+        os.environ["AEROPT_ALLOW_TEST_DOUBLE"] = "1"
+        try:
+            result = run_design(request)
+        finally:
+            if old_value is None:
+                os.environ.pop("AEROPT_ALLOW_TEST_DOUBLE", None)
+            else:
+                os.environ["AEROPT_ALLOW_TEST_DOUBLE"] = old_value
+
+        geometry = result["wing"]["geometry"]
+        self.assertAlmostEqual(geometry["span"], 1.75, places=12)
+        self.assertAlmostEqual(geometry["root_chord"], 0.31, places=12)
+        self.assertAlmostEqual(geometry["taper"], 0.62, places=12)
+        self.assertAlmostEqual(geometry["sweep_deg"], 4.0, places=12)
+        self.assertAlmostEqual(geometry["tip_twist_deg"], -1.5, places=12)
 
     def test_optional_winglet_stage_compares_against_planar_optimum(self):
         request = {

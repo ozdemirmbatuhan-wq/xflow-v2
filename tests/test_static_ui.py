@@ -66,6 +66,20 @@ class StaticUiContractTests(unittest.TestCase):
         usage = render_result.index("...scalarDownloads")
         self.assertLess(declaration, usage)
 
+    def test_highest_ld_comparison_and_downloads_are_wired(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        render_result = javascript.split("function renderResult(result) {", 1)[1].split(
+            "async function optimize", 1
+        )[0]
+        declaration = render_result.index("const highestLdDownloads")
+        usage = render_result.index("...highestLdDownloads")
+        self.assertLess(declaration, usage)
+        self.assertIn("result.highest_ld_comparison", javascript)
+        self.assertIn("En yüksek L/D finalisti", javascript)
+        self.assertIn("En yüksek L/D · STEP", javascript)
+        self.assertIn("highest-ld/", html)
+
     def test_winglet_controls_are_serialized_and_comparison_is_rendered(self):
         javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         for field in (
@@ -124,6 +138,25 @@ class StaticUiContractTests(unittest.TestCase):
         self.assertIn('workflow: { mode: workflowMode }', javascript)
         self.assertIn('aeropt.savedAirfoil.v1', javascript)
         self.assertIn('result.workflow_mode === "foil_only"', javascript)
+
+    def test_completion_auto_downloads_one_bundle_and_cancel_shows_best_snapshot(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("function autoDownloadResult", javascript)
+        self.assertIn("ex.flow5_bundle_base64 || ex.foil_bundle_base64", javascript)
+        self.assertIn("renderResult(result); autoDownloadResult(result)", javascript)
+        self.assertIn("renderCancelledBest(state.best_so_far || {})", javascript)
+        self.assertIn("aeropt-best-so-far.json", javascript)
+        self.assertIn('id="resultEyebrow"', html)
+
+    def test_equal_range_guidance_and_total_cpu_budget_are_visible(self):
+        html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("Min ve Max alanlarına aynı değeri girin", html)
+        self.assertIn("Toplam CPU bütçesi", html)
+        self.assertIn("NumPy/SciPy", html)
+        self.assertIn('"Toplam CPU bütçesi"', javascript)
+        self.assertIn('"İç sayısal havuzlar"', javascript)
 
     def test_coupled_round_control_explains_cl_and_re_feedback(self):
         html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
