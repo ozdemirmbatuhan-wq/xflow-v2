@@ -5,7 +5,7 @@ import io
 import json
 import zipfile
 from math import cos, radians, sin
-from typing import Sequence
+from typing import Mapping, Sequence
 from xml.dom import minidom
 from xml.etree import ElementTree as ET
 
@@ -557,6 +557,31 @@ def xfoil_polar_csv(points: list[dict[str, float]]) -> str:
     return output.getvalue()
 
 
+def foil_bundle_bytes(
+    *,
+    foil_dat_text: str,
+    project_json_text: str,
+    polar_csv_text: str | None,
+) -> bytes:
+    """Package every file shown by the foil-only result screen in one download."""
+    output = io.BytesIO()
+    guide = """AeroOpt profil aktarım paketi
+
+1. aeropt-airfoil.dat optimize profil koordinatlarını içerir.
+2. flow5-xfoil-polar.csv çok noktalı flow5/XFoil polarını içerir.
+3. aeropt-foil-project.json girdileri ve çözücü sonuçlarını birlikte saklar.
+"""
+    with zipfile.ZipFile(
+        output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9
+    ) as archive:
+        archive.writestr("README-foil.txt", guide)
+        archive.writestr("aeropt-airfoil.dat", foil_dat_text)
+        archive.writestr("aeropt-foil-project.json", project_json_text)
+        if polar_csv_text:
+            archive.writestr("flow5-xfoil-polar.csv", polar_csv_text)
+    return output.getvalue()
+
+
 def flow5_bundle_bytes(
     *,
     foil_dat_text: str,
@@ -574,6 +599,7 @@ def flow5_bundle_bytes(
     scalar_only_results_csv_text: str | None = None,
     scalar_only_flow5_project_bytes: bytes | None = None,
     scalar_only_same_as_primary: bool | None = None,
+    highest_ld_files: Mapping[str, str | bytes] | None = None,
 ) -> bytes:
     """Package the exact foil, 3D wing, plane definition and analysis data together."""
     output = io.BytesIO()
@@ -600,6 +626,12 @@ def flow5_bundle_bytes(
         scalar_line = "8. Skaler-puan alternatifi raporlandı ancak teslim edilebilir CAD çıktısı üretilemedi."
     else:
         scalar_line = ""
+    highest_ld_line = (
+        "9. highest-ld/ klasörü, referans hızdaki en yüksek fizibil L/D finalistinin "
+        "ayrı geometri, sonuç ve flow5 dosyalarını içerir."
+        if highest_ld_files
+        else ""
+    )
     guide = f"""AeroOpt flow5 aktarım paketi
 
 1. aeropt-airfoil.dat profilini içe aktarın.
@@ -610,6 +642,7 @@ def flow5_bundle_bytes(
 6. aeropt-analysis.xml son flow5 analiz ayarlarını içerir.
 {solved_line}
 {scalar_line}
+{highest_ld_line}
 
 Kaynak etiketi flow5 olan sayılar AeroOpt korelasyonundan değil flow5 API çıktısından alınmıştır.
 """
@@ -645,4 +678,9 @@ Kaynak etiketi flow5 olan sayılar AeroOpt korelasyonundan değil flow5 API çı
                 "aeropt-scalar-only-optimized.fl5",
                 scalar_only_flow5_project_bytes,
             )
+        if highest_ld_files:
+            for filename, contents in sorted(highest_ld_files.items()):
+                if not filename or "/" in filename or "\\" in filename or filename in {".", ".."}:
+                    raise ValueError("En yüksek L/D paket dosyası düz bir dosya adı olmalı")
+                archive.writestr(f"highest-ld/{filename}", contents)
     return output.getvalue()

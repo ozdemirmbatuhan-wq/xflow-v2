@@ -22,6 +22,32 @@ from .models import AirfoilLike, Fluid, WingGeometry
 PROTOCOL = "aeropt-flow5-v1"
 
 
+def _bounded_solver_environment(request: dict[str, Any]) -> dict[str, str]:
+    """Keep each native runner's numerical libraries inside its assigned slot."""
+    environment = os.environ.copy()
+    try:
+        requested_threads = max(1, int(request.get("max_threads", 1)))
+    except (TypeError, ValueError):
+        requested_threads = 1
+    environment["AEROPT_CPU_BUDGET"] = str(requested_threads)
+    # Foil optimization already parallelizes independent flow5 cases and
+    # candidate runner processes explicitly. A second OpenMP/BLAS pool inside
+    # every process would multiply the requested budget and saturate the CPU.
+    for key in (
+        "OMP_NUM_THREADS",
+        "OMP_THREAD_LIMIT",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "BLIS_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ):
+        environment[key] = "1"
+    environment["OMP_DYNAMIC"] = "FALSE"
+    environment["MKL_DYNAMIC"] = "FALSE"
+    return environment
+
+
 def _hidden_subprocess_kwargs() -> dict[str, Any]:
     """Keep console-mode solver children invisible in the Windows GUI build."""
     if os.name != "nt":
@@ -388,6 +414,7 @@ class Flow5Runner:
                 process = subprocess.Popen(
                     self._command(request_path, response_path),
                     cwd=workdir,
+                    env=_bounded_solver_environment(request),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,

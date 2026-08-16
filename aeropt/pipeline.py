@@ -4,11 +4,13 @@ import base64
 from copy import deepcopy
 from dataclasses import replace
 from math import ceil
+import os
 from pathlib import Path
 import threading
 from typing import Any, Callable
 
 import numpy as np
+from threadpoolctl import threadpool_limits
 
 from .airfoil import generate_polar, naca4_coordinates, naca4_design
 from .baselines import build_baseline_profile
@@ -606,7 +608,13 @@ def run_design(
         raise InputError("Ayrık profil/kanat çalışma modları yalnız flow5-native zincirinde kullanılabilir")
 
     flow5_runner_path = str(solver_cfg.get("flow5_runner_path", "")).strip()
-    flow5_threads = int(_number(solver_cfg, "flow5_threads", minimum=1.0, maximum=64.0))
+    flow5_threads_value = _number(
+        solver_cfg, "flow5_threads", minimum=1.0, maximum=64.0
+    )
+    if not float(flow5_threads_value).is_integer():
+        raise InputError("'flow5_threads' tam sayı olmalı")
+    flow5_threads_requested = int(flow5_threads_value)
+    flow5_threads = min(flow5_threads_requested, os.cpu_count() or 1)
     flow5_timeout = _number(
         solver_cfg, "flow5_timeout_seconds", minimum=30.0
     )
@@ -1003,12 +1011,29 @@ def run_design(
             "alpha_bounds": alpha_bounds,
             "cancel_event": cancel_event,
         }
+
+        def run_native_with_cpu_budget(
+            *,
+            native_request: dict[str, Any],
+            native_settings: Flow5NativeSettings,
+            native_progress: Callable[[dict[str, Any]], None] | None,
+        ) -> dict[str, Any]:
+            # NumPy/SciPy use their own BLAS pool. Without this guard, the
+            # surrogate fit can use every logical core even when the flow5
+            # control is set to a smaller value.
+            with threadpool_limits(limits=flow5_threads, user_api="blas"):
+                return run_flow5_native_design(
+                    request=native_request,
+                    settings=native_settings,
+                    progress_callback=native_progress,
+                    **native_kwargs,
+                )
+
         if workflow_mode == "foil_only":
-            foil_result = run_flow5_native_design(
-                request=request,
-                settings=replace(settings, multi_seed_runs=1),
-                progress_callback=progress_callback,
-                **native_kwargs,
+            foil_result = run_native_with_cpu_budget(
+                native_request=request,
+                native_settings=replace(settings, multi_seed_runs=1),
+                native_progress=progress_callback,
             )
             foil_result["multi_seed_stability"] = {
                 "enabled": False,
@@ -1019,6 +1044,9 @@ def run_design(
                 "status": "not_applicable",
                 "runs": [],
             }
+            solver_run = foil_result.setdefault("solver_run", {})
+            solver_run["flow5_threads_requested"] = flow5_threads_requested
+            solver_run["flow5_threads"] = flow5_threads
             return foil_result
         seed_records: list[dict[str, Any]] = []
         for run_index in range(settings.multi_seed_runs):
@@ -1051,11 +1079,10 @@ def run_design(
                 )
 
             try:
-                run_result = run_flow5_native_design(
-                    request=run_request,
-                    settings=run_settings,
-                    progress_callback=seed_progress,
-                    **native_kwargs,
+                run_result = run_native_with_cpu_budget(
+                    native_request=run_request,
+                    native_settings=run_settings,
+                    native_progress=seed_progress,
                 )
                 run_result["validation_report"] = build_validation_report(
                     run_result, settings.validation_settings
@@ -1103,6 +1130,10 @@ def run_design(
         )
         selected_result["solver_run"]["multi_seed_runs"] = settings.multi_seed_runs
         selected_result["solver_run"]["selected_seed"] = stability["selected_seed"]
+        selected_result["solver_run"]["flow5_threads_requested"] = (
+            flow5_threads_requested
+        )
+        selected_result["solver_run"]["flow5_threads"] = flow5_threads
         selected_result["flow5_native_analysis"]["multi_seed_stability"] = stability
         selected_result["flow5_native_analysis"]["validation_report"] = selected_result[
             "validation_report"

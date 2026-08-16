@@ -4,6 +4,7 @@ import base64
 from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
+import json
 import math
 import threading
 from typing import Any, Callable
@@ -16,6 +17,7 @@ from .checkpoint import OptimizerCheckpointStore, optimizer_fingerprint
 from .convergence import BudgetEscalationSettings
 from .exporters import (
     airfoil_dat,
+    foil_bundle_bytes,
     flow5_analysis_xml,
     flow5_bundle_bytes,
     flow5_native_results_csv,
@@ -799,6 +801,35 @@ def run_flow5_native_design(
         response = wing_response.get("_scalar_only_alternative_response")
         return scalar, response if isinstance(response, dict) else None
 
+    def highest_ld_stage_choice(
+        stage: str,
+        wing_result: dict[str, Any],
+        wing_metadata: dict[str, Any],
+        wing_response: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        candidate = deepcopy(wing_metadata.get("highest_ld_candidate", {}))
+        if not candidate:
+            candidate = {
+                "definition": "Referans hızdaki en yüksek flow5 L/D finalisti",
+                "selection_basis": "selected stage result; legacy fallback",
+                "available": True,
+                "deliverable": True,
+                "same_as_selected": True,
+                "feasible": bool(wing_metadata.get("feasible", False)),
+                "constraint_feasible": bool(wing_metadata.get("feasible", False)),
+                "constraint_violation": 0.0,
+                "objective": float(wing_metadata["objective"]),
+                "mesh_convergence": wing_metadata.get("mesh_convergence"),
+                "wing": wing_result,
+                "coarse_wing": None,
+                "error": None,
+            }
+        candidate["stage"] = stage
+        if candidate.get("same_as_selected"):
+            return candidate, wing_response
+        response = wing_response.get("_highest_ld_candidate_response")
+        return candidate, response if isinstance(response, dict) else None
+
     def optimize_wing_stage(
         *,
         foil: CSTAirfoilDesign,
@@ -878,6 +909,11 @@ def run_flow5_native_design(
         else:
             planar_wing, planar_baseline, planar_meta, planar_response = fixed_planar
         if not run_winglet:
+            planar_highest_ld, _ = highest_ld_stage_choice(
+                "planar", planar_wing, planar_meta, planar_response
+            )
+            planar_highest_ld["selection_scope"] = "planar kanat finalistleri"
+            planar_meta["highest_ld_candidate"] = planar_highest_ld
             planar_meta["winglet_comparison"] = {
                 "enabled": settings.winglet_optimization_enabled,
                 "performed": False,
@@ -971,6 +1007,7 @@ def run_flow5_native_design(
             "wing_budget": "winglet_budget",
             "wing_final": "winglet_final",
             "mesh_convergence": "winglet_convergence",
+            "highest_ld_final": "winglet_highest_ld_final",
         }
 
         def winglet_report(event: dict[str, Any]) -> None:
@@ -1020,6 +1057,13 @@ def run_flow5_native_design(
                 "included_in_coupled_loop": False,
                 "model": "flow5 high-dihedral fourth section",
             }
+            planar_highest_ld, _ = highest_ld_stage_choice(
+                "planar", planar_wing, planar_meta, planar_response
+            )
+            planar_highest_ld["selection_scope"] = (
+                "planar finalistler; winglet aşaması tamamlanamadı"
+            )
+            planar_meta["highest_ld_candidate"] = planar_highest_ld
             planar_meta["winglet_comparison"] = comparison
             return planar_wing, planar_baseline, planar_meta, planar_response
 
@@ -1121,12 +1165,78 @@ def run_flow5_native_design(
             "yalnız skaler toplam amacın seçeceği sonuç"
         )
         selected_meta["selection_comparison"] = selected_comparison
+        planar_highest_ld, planar_highest_ld_response = highest_ld_stage_choice(
+            "planar", planar_wing, planar_meta, planar_response
+        )
+        winglet_highest_ld, winglet_highest_ld_response = highest_ld_stage_choice(
+            "winglet", winglet_wing, winglet_meta, winglet_response
+        )
+        highest_ld_choices = [
+            (planar_highest_ld, planar_highest_ld_response),
+            (winglet_highest_ld, winglet_highest_ld_response),
+        ]
+        available_highest_ld_choices = [
+            item
+            for item in highest_ld_choices
+            if item[0].get("available") and isinstance(item[0].get("wing"), dict)
+        ]
+        constraint_feasible_choices = [
+            item
+            for item in available_highest_ld_choices
+            if item[0].get("constraint_feasible")
+        ]
+        fully_feasible_choices = [
+            item
+            for item in constraint_feasible_choices
+            if item[0].get("feasible")
+        ]
+        highest_ld_pool = (
+            fully_feasible_choices
+            or constraint_feasible_choices
+            or available_highest_ld_choices
+        )
+        if highest_ld_pool:
+            overall_highest_ld, overall_highest_ld_response = max(
+                highest_ld_pool,
+                key=lambda item: float(item[0]["wing"]["ld"]),
+            )
+            overall_highest_ld = deepcopy(overall_highest_ld)
+            same_highest_ld_as_selected = same_wing_geometry(
+                selected_wing, overall_highest_ld["wing"]
+            )
+            overall_highest_ld["same_as_selected"] = bool(
+                same_highest_ld_as_selected
+            )
+            overall_highest_ld["selection_scope"] = (
+                "planar finalistler ve tek son işlem winglet finalistleri"
+            )
+            selected_meta["highest_ld_candidate"] = overall_highest_ld
+        else:
+            overall_highest_ld_response = None
+            same_highest_ld_as_selected = False
+            selected_meta["highest_ld_candidate"] = {
+                "available": False,
+                "deliverable": False,
+                "same_as_selected": False,
+                "selection_scope": (
+                    "planar finalistler ve tek son işlem winglet finalistleri"
+                ),
+                "error": "Hiçbir en yüksek L/D finalisti çıktı ağında çözülemedi",
+            }
         selected_meta["winglet_comparison"] = comparison
         output_response = dict(selected_response)
         output_response.pop("_scalar_only_alternative_response", None)
         if not same_as_selected and overall_scalar_response is not None:
             output_response["_scalar_only_alternative_response"] = dict(
                 overall_scalar_response
+            )
+        output_response.pop("_highest_ld_candidate_response", None)
+        if (
+            not same_highest_ld_as_selected
+            and overall_highest_ld_response is not None
+        ):
+            output_response["_highest_ld_candidate_response"] = dict(
+                overall_highest_ld_response
             )
         return selected_wing, selected_baseline, selected_meta, output_response
 
@@ -1159,6 +1269,7 @@ def run_flow5_native_design(
             surrogate_settings=settings.surrogate_settings,
             budget_escalation_settings=settings.budget_escalation_settings,
             checkpoint_store=checkpoint_store,
+            reference_speed_m_s=reference_speed_m_s,
             checkpoint_key=checkpoint_key(
                 "foil-only",
                 {
@@ -1212,6 +1323,9 @@ def run_flow5_native_design(
                 "workflow_mode": "foil_only",
                 "aerodynamic_score_source": "flow5 only",
                 "flow5_threads": settings.threads,
+                "cpu_budget_enforced": True,
+                "python_blas_thread_limit": settings.threads,
+                "runner_blas_threads_per_process": 1,
                 "speed_samples": speed_samples,
                 "speed_samples_requested": requested_speed_samples,
                 "foil_candidate_budget": settings.foil_candidate_budget,
@@ -1307,6 +1421,11 @@ def run_flow5_native_design(
         polar_text = xfoil_polar_csv(reference_polar["points"])
         snapshot = deepcopy(result)
         project_text = project_json(request, snapshot)
+        foil_bundle = foil_bundle_bytes(
+            foil_dat_text=selected_foil_dat_text,
+            project_json_text=project_text,
+            polar_csv_text=polar_text,
+        )
         result["exports"] = {
             "airfoil_filename": f"{foil.name}.dat",
             "airfoil_dat": selected_foil_dat_text,
@@ -1314,6 +1433,8 @@ def run_flow5_native_design(
             "project_json": project_text,
             "xfoil_polar_filename": "flow5-xfoil-polar.csv",
             "xfoil_polar_csv": polar_text,
+            "foil_bundle_filename": "aeropt-foil-package.zip",
+            "foil_bundle_base64": base64.b64encode(foil_bundle).decode("ascii"),
         }
         if progress_callback is not None:
             progress_callback(
@@ -1402,6 +1523,7 @@ def run_flow5_native_design(
                 surrogate_settings=settings.surrogate_settings,
                 budget_escalation_settings=settings.budget_escalation_settings,
                 checkpoint_store=checkpoint_store,
+                reference_speed_m_s=reference_speed_m_s,
                 checkpoint_key=checkpoint_key(
                     f"foil-coupled-{iteration + 1}",
                     {
@@ -1628,6 +1750,7 @@ def run_flow5_native_design(
                 surrogate_settings=settings.surrogate_settings,
                 budget_escalation_settings=settings.budget_escalation_settings,
                 checkpoint_store=checkpoint_store,
+                reference_speed_m_s=reference_speed_m_s,
                 checkpoint_key=checkpoint_key(
                     f"foil-spanwise-{station_name}",
                     {
@@ -1828,6 +1951,9 @@ def run_flow5_native_design(
             "strategy_used": "flow5_native",
             "aerodynamic_score_source": "flow5 only",
             "flow5_threads": settings.threads,
+            "cpu_budget_enforced": True,
+            "python_blas_thread_limit": settings.threads,
+            "runner_blas_threads_per_process": 1,
             "speed_samples": speed_samples,
             "speed_samples_requested": requested_speed_samples,
             "foil_candidate_budget": settings.foil_candidate_budget,
@@ -1911,6 +2037,15 @@ def run_flow5_native_design(
         "rectangular_baseline": baseline,
         "wing_optimization": wing_meta,
         "winglet_comparison": winglet_comparison,
+        "highest_ld_comparison": wing_meta.get(
+            "highest_ld_candidate",
+            {
+                "available": False,
+                "deliverable": False,
+                "same_as_selected": False,
+                "error": "En yüksek L/D finalisti raporlanmadı",
+            },
+        ),
         "structural_analysis": wing.get(
             "structural",
             {"enabled": False, "performed": False, "passed": True},
@@ -1961,6 +2096,7 @@ def run_flow5_native_design(
             },
             "spanwise_airfoils": spanwise_airfoil_meta,
             "winglet_comparison": winglet_comparison,
+            "highest_ld_comparison": wing_meta.get("highest_ld_candidate", {}),
             "winglet_execution_policy": "post_coupling_once",
             "winglet_naca_airfoil": winglet_foil.to_dict(),
         },
@@ -2053,7 +2189,7 @@ def run_flow5_native_design(
         scalar_section_foils = (
             (*main_section_foils, winglet_foil)
             if scalar_geometry.winglet_active
-            else section_foils
+            else main_section_foils
         )
         scalar_obj_text = wing_obj(
             foil,
@@ -2061,6 +2197,158 @@ def run_flow5_native_design(
             section_foils=scalar_section_foils,
         )
         scalar_results_text = flow5_native_results_csv(foil, scalar_wing)
+
+    highest_ld_selection = wing_meta.get("highest_ld_candidate", {})
+    highest_ld_same = bool(highest_ld_selection.get("same_as_selected", False))
+    highest_ld_wing = highest_ld_selection.get("wing")
+    highest_ld_plane_text: str | None = None
+    highest_ld_analysis_text: str | None = None
+    highest_ld_obj_text: str | None = None
+    highest_ld_results_text: str | None = None
+    highest_ld_summary_text: str | None = None
+    highest_ld_project_payload: dict[str, Any] | None = None
+    highest_ld_step_payload: dict[str, Any] | None = None
+    highest_ld_project_bytes: bytes | None = None
+    highest_ld_step_bytes: bytes | None = None
+    highest_ld_files: dict[str, str | bytes] = {}
+    highest_ld_export_error: str | None = None
+    if highest_ld_selection.get("available") and isinstance(highest_ld_wing, dict):
+        highest_ld_geometry = geometry_from_result(highest_ld_wing)
+        highest_ld_section_foils = (
+            (*main_section_foils, winglet_foil)
+            if highest_ld_geometry.winglet_active
+            else main_section_foils
+        )
+        highest_ld_section_dats = (
+            (*main_section_dats, winglet_dat_text)
+            if highest_ld_geometry.winglet_active
+            else main_section_dats
+        )
+        highest_ld_mesh = (
+            (highest_ld_selection.get("mesh_convergence") or {}).get(
+                "output_mesh"
+            )
+            or output_mesh
+        )
+        highest_ld_plane_text = flow5_plane_xml(
+            foil,
+            highest_ld_geometry,
+            chordwise_panels=int(highest_ld_mesh["chordwise_panels"]),
+            half_span_panels=int(highest_ld_mesh["half_span_panels"]),
+            section_foils=highest_ld_section_foils,
+        )
+        highest_ld_analysis_text = flow5_analysis_xml(
+            highest_ld_geometry,
+            fluid,
+            reference_speed_m_s,
+            settings.final_method,
+            ncrit=settings.ncrit,
+            xtr_top=settings.xtr_top,
+            xtr_bottom=settings.xtr_bottom,
+        )
+        highest_ld_obj_text = wing_obj(
+            foil,
+            highest_ld_geometry,
+            section_foils=highest_ld_section_foils,
+        )
+        highest_ld_results_text = flow5_native_results_csv(
+            foil, highest_ld_wing
+        )
+        highest_ld_response = (
+            wing_response
+            if highest_ld_same
+            else wing_response.get("_highest_ld_candidate_response")
+        )
+        if isinstance(highest_ld_response, dict):
+            highest_ld_artifacts = highest_ld_response.get("artifact_payloads", {})
+            highest_ld_project_payload = highest_ld_artifacts.get("project_fl5")
+            highest_ld_step_payload = highest_ld_artifacts.get("wing_step")
+        if highest_ld_project_payload and highest_ld_step_payload:
+            try:
+                highest_ld_project_bytes = base64.b64decode(
+                    highest_ld_project_payload["base64"]
+                )
+                highest_ld_step_bytes = base64.b64decode(
+                    highest_ld_step_payload["base64"]
+                )
+                if not highest_ld_step_bytes.lstrip().startswith(
+                    b"ISO-10303-21;"
+                ) or b"END-ISO-10303-21;" not in highest_ld_step_bytes:
+                    raise ValueError("STEP dosyası ISO 10303 zarfını geçemedi")
+                if b"SI_UNIT($,.METRE.)" not in highest_ld_step_bytes.replace(
+                    b" ", b""
+                ):
+                    raise ValueError("STEP uzunluk birimi metre değil")
+            except (KeyError, TypeError, ValueError) as exc:
+                highest_ld_project_bytes = None
+                highest_ld_step_bytes = None
+                highest_ld_export_error = str(exc)
+        else:
+            highest_ld_export_error = (
+                "En yüksek L/D finalisti için .fl5 ve STEP artifact'leri birlikte üretilemedi"
+            )
+
+        highest_ld_summary = {
+            "folder": "highest-ld/",
+            "definition": highest_ld_selection.get("definition"),
+            "selection_basis": highest_ld_selection.get("selection_basis"),
+            "selection_scope": highest_ld_selection.get("selection_scope"),
+            "stage": highest_ld_selection.get("stage"),
+            "reference_speed_m_s": highest_ld_selection.get(
+                "reference_speed_m_s", reference_speed_m_s
+            ),
+            "same_as_selected": highest_ld_same,
+            "feasible": bool(highest_ld_selection.get("feasible", False)),
+            "constraint_feasible": bool(
+                highest_ld_selection.get("constraint_feasible", False)
+            ),
+            "constraint_violation": highest_ld_selection.get(
+                "constraint_violation"
+            ),
+            "objective": highest_ld_selection.get("objective"),
+            "native_artifacts_available": bool(
+                highest_ld_project_bytes and highest_ld_step_bytes
+            ),
+            "export_error": highest_ld_export_error,
+            "selected_wing": wing,
+            "highest_ld_wing": highest_ld_wing,
+        }
+        highest_ld_summary_text = json.dumps(
+            highest_ld_summary,
+            ensure_ascii=False,
+            indent=2,
+            allow_nan=False,
+        )
+        highest_ld_guide = (
+            "AeroOpt en yüksek L/D finalisti\n\n"
+            "Bu klasör, referans hızdaki en yüksek L/D değerine sahip sert-kısıt "
+            "uygun flow5 finalistini ana seçimin yanında ayrı tutar.\n"
+            "aeropt-highest-ld-wing.step metre biriminde kapalı CAD katısıdır.\n"
+            "aeropt-highest-ld-optimized.fl5 çözümlenmiş flow5 projesidir.\n"
+            "aeropt-highest-ld-summary.json seçim kapsamını ve ana kanatla "
+            "karşılaştırma verisini içerir.\n"
+        )
+        highest_ld_files = {
+            "README-highest-ld.txt": highest_ld_guide,
+            "aeropt-airfoil.dat": foil_text,
+            "aeropt-highest-ld-wing.xml": highest_ld_plane_text,
+            "aeropt-highest-ld-analysis.xml": highest_ld_analysis_text,
+            "aeropt-highest-ld-wing.obj": highest_ld_obj_text,
+            "aeropt-highest-ld-results.csv": highest_ld_results_text,
+            "aeropt-highest-ld-summary.json": highest_ld_summary_text,
+        }
+        for station, dat_text in zip(
+            ("root", "mid", "tip", "winglet"), highest_ld_section_dats
+        ):
+            highest_ld_files[f"aeropt-airfoil-{station}.dat"] = dat_text
+        if highest_ld_step_bytes:
+            highest_ld_files["aeropt-highest-ld-wing.step"] = (
+                highest_ld_step_bytes
+            )
+        if highest_ld_project_bytes:
+            highest_ld_files["aeropt-highest-ld-optimized.fl5"] = (
+                highest_ld_project_bytes
+            )
     snapshot = deepcopy(result)
     project_text = project_json(request, snapshot)
     bundle = flow5_bundle_bytes(
@@ -2079,6 +2367,7 @@ def run_flow5_native_design(
         scalar_only_results_csv_text=scalar_results_text,
         scalar_only_flow5_project_bytes=scalar_project_bytes,
         scalar_only_same_as_primary=scalar_same,
+        highest_ld_files=highest_ld_files or None,
     )
     result["exports"] = {
         "airfoil_filename": f"{foil.name}.dat",
@@ -2129,6 +2418,64 @@ def run_flow5_native_design(
             "flow5_project_base64": (
                 scalar_project_payload.get("base64")
                 if scalar_project_payload
+                else None
+            ),
+        },
+        "highest_ld": {
+            "available": bool(
+                highest_ld_selection.get("available")
+                and isinstance(highest_ld_wing, dict)
+            ),
+            "deliverable": highest_ld_obj_text is not None,
+            "native_artifacts_available": bool(
+                highest_ld_project_bytes and highest_ld_step_bytes
+            ),
+            "same_as_selected": highest_ld_same,
+            "stage": highest_ld_selection.get("stage"),
+            "folder": "highest-ld/" if highest_ld_obj_text else None,
+            "error": highest_ld_export_error or highest_ld_selection.get("error"),
+            "plane_filename": (
+                "aeropt-highest-ld-wing.xml" if highest_ld_plane_text else None
+            ),
+            "plane_xml": highest_ld_plane_text,
+            "analysis_filename": (
+                "aeropt-highest-ld-analysis.xml"
+                if highest_ld_analysis_text
+                else None
+            ),
+            "analysis_xml": highest_ld_analysis_text,
+            "wing_obj_filename": (
+                "aeropt-highest-ld-wing.obj" if highest_ld_obj_text else None
+            ),
+            "wing_obj": highest_ld_obj_text,
+            "wing_step_filename": (
+                "aeropt-highest-ld-wing.step" if highest_ld_step_payload else None
+            ),
+            "wing_step_base64": (
+                highest_ld_step_payload.get("base64")
+                if highest_ld_step_bytes and highest_ld_step_payload
+                else None
+            ),
+            "results_filename": (
+                "aeropt-highest-ld-results.csv"
+                if highest_ld_results_text
+                else None
+            ),
+            "results_csv": highest_ld_results_text,
+            "summary_filename": (
+                "aeropt-highest-ld-summary.json"
+                if highest_ld_summary_text
+                else None
+            ),
+            "summary_json": highest_ld_summary_text,
+            "flow5_project_filename": (
+                "aeropt-highest-ld-optimized.fl5"
+                if highest_ld_project_payload
+                else None
+            ),
+            "flow5_project_base64": (
+                highest_ld_project_payload.get("base64")
+                if highest_ld_project_bytes and highest_ld_project_payload
                 else None
             ),
         },

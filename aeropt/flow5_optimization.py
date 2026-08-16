@@ -9,7 +9,12 @@ from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
 
-from .airfoil import cst_geometry_is_valid, fit_naca_to_cst, make_cst_airfoil
+from .airfoil import (
+    airfoil_coordinates,
+    cst_geometry_is_valid,
+    fit_naca_to_cst,
+    make_cst_airfoil,
+)
 from .baselines import BaselineProfile
 from .checkpoint import OptimizerCheckpointStore
 from .convergence import BudgetEscalationController, BudgetEscalationSettings
@@ -143,14 +148,38 @@ def wing_candidate_selection_key(candidate: WingCandidate) -> tuple[float, float
     )
 
 
+def wing_reference_ld(
+    candidate: WingCandidate, reference_speed_m_s: float | None = None
+) -> float:
+    """Return a candidate's solver L/D at the operating point nearest reference speed."""
+    if not candidate.conditions:
+        return -math.inf
+    if reference_speed_m_s is None:
+        condition = candidate.conditions[0]
+    else:
+        condition = min(
+            candidate.conditions,
+            key=lambda item: abs(
+                float(item.get("speed_m_s", reference_speed_m_s))
+                - reference_speed_m_s
+            ),
+        )
+    try:
+        value = float(condition["ld"])
+    except (KeyError, TypeError, ValueError):
+        return -math.inf
+    return value if math.isfinite(value) else -math.inf
+
+
 def select_wing_finalist_indices(
     candidates: Sequence[WingCandidate],
     finalist_count: int,
     objective_keys: Sequence[str],
     *,
     optimizer: str,
+    reference_speed_m_s: float | None = None,
 ) -> tuple[list[int], dict[str, Any]]:
-    """Keep feasibility-first finalists and append the scalar-only winner."""
+    """Keep normal finalists and append scalar-only and maximum-L/D diagnostics."""
     if not candidates:
         raise ValueError("Finalist seçimi için en az bir kanat adayı gerekli")
     requested = max(1, min(int(finalist_count), len(candidates)))
@@ -165,6 +194,21 @@ def select_wing_finalist_indices(
             if math.isfinite(float(candidates[index].score))
             else math.inf,
             index,
+        ),
+    )
+    feasible_indices = [
+        index
+        for index, candidate in enumerate(candidates)
+        if wing_constraint_violation(candidate) <= 1.0e-12
+    ]
+    highest_ld_pool = feasible_indices or list(range(len(candidates)))
+    highest_ld_index = max(
+        highest_ld_pool,
+        key=lambda index: (
+            wing_reference_ld(candidates[index], reference_speed_m_s),
+            -wing_constraint_violation(candidates[index]),
+            -float(candidates[index].score),
+            -index,
         ),
     )
     selected = [feasibility_index]
@@ -203,12 +247,24 @@ def select_wing_finalist_indices(
     if scalar_added:
         # This diagnostic candidate does not consume the user's finalist quota.
         selected.append(scalar_index)
+    highest_ld_added = highest_ld_index not in selected
+    if highest_ld_added:
+        # The maximum reference-speed L/D diagnostic also sits outside the quota.
+        selected.append(highest_ld_index)
     return selected, {
         "requested_finalists": requested,
         "evaluated_finalists": len(selected),
         "feasibility_first_search_index": int(feasibility_index),
         "scalar_only_search_index": int(scalar_index),
         "scalar_only_diagnostic_added": bool(scalar_added),
+        "highest_ld_search_index": int(highest_ld_index),
+        "highest_ld_diagnostic_added": bool(highest_ld_added),
+        "highest_ld_search_feasible": bool(feasible_indices),
+        "highest_ld_reference_speed_m_s": (
+            float(reference_speed_m_s)
+            if reference_speed_m_s is not None
+            else None
+        ),
     }
 
 
@@ -500,22 +556,189 @@ def _emit_progress(
     current: int,
     total: int,
     message: str,
+    *,
+    best_so_far: dict[str, Any] | None = None,
 ) -> None:
     if callback is not None:
-        callback(
-            {
-                "stage": stage,
-                "current": int(current),
-                "total": int(max(total, 1)),
-                "fraction": float(np.clip(current / max(total, 1), 0.0, 1.0)),
-                "message": message,
-            }
-        )
+        payload: dict[str, Any] = {
+            "stage": stage,
+            "current": int(current),
+            "total": int(max(total, 1)),
+            "fraction": float(np.clip(current / max(total, 1), 0.0, 1.0)),
+            "message": message,
+        }
+        if best_so_far:
+            payload["best_so_far"] = best_so_far
+        callback(payload)
 
 
 def _check_cancelled(cancel_event: threading.Event | None) -> None:
     if cancel_event is not None and cancel_event.is_set():
         raise Flow5CancelledError("Optimizasyon kullanıcı tarafından durduruldu")
+
+
+def _airfoil_preview_coordinates(
+    foil: AirfoilLike, coordinate_points: int
+) -> list[dict[str, float]]:
+    x, y = airfoil_coordinates(foil, total_points=coordinate_points)
+    return [
+        {"x_over_c": float(xi), "y_over_c": float(yi)}
+        for xi, yi in zip(x, y)
+    ]
+
+
+def _airfoil_preview_coordinates_from_dat(
+    foil_dat_text: str,
+) -> list[dict[str, float]]:
+    coordinates: list[dict[str, float]] = []
+    for line in foil_dat_text.splitlines()[1:]:
+        fields = line.replace(",", " ").split()
+        if len(fields) < 2:
+            continue
+        try:
+            x_value, y_value = float(fields[0]), float(fields[1])
+        except ValueError:
+            continue
+        if math.isfinite(x_value) and math.isfinite(y_value):
+            coordinates.append({"x_over_c": x_value, "y_over_c": y_value})
+    return coordinates
+
+
+def _finite_polar_preview(response: dict[str, Any], speed_m_s: float) -> list[dict[str, float]]:
+    polars = response.get("polars", [])
+    if not polars:
+        return []
+    polar = min(
+        polars,
+        key=lambda item: abs(float(item.get("speed_m_s", speed_m_s)) - speed_m_s),
+    )
+    rows: list[dict[str, float]] = []
+    for point in polar.get("points", []):
+        try:
+            alpha = float(point["alpha_deg"])
+            cl = float(point["cl"])
+            cd = float(point["cd"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if all(math.isfinite(value) for value in (alpha, cl, cd)):
+            rows.append({"alpha_deg": alpha, "cl": cl, "cd": cd})
+    return rows
+
+
+def _foil_candidate_preview(
+    candidate: FoilCandidate,
+    *,
+    reference_speed_m_s: float,
+    coordinate_points: int,
+    evaluations: int,
+    stage: str,
+    foil_dat_override: str | None = None,
+) -> dict[str, Any] | None:
+    if (
+        not math.isfinite(candidate.score)
+        or not candidate.response
+        or not candidate.conditions
+    ):
+        return None
+    condition = min(
+        candidate.conditions,
+        key=lambda item: abs(float(item["speed_m_s"]) - reference_speed_m_s),
+    )
+    point = condition["point"]
+    cd = float(point["cd"])
+    target_cl = float(condition["target_cl"])
+    return {
+        "stage": stage,
+        "evaluations": int(evaluations),
+        "objective": float(candidate.score),
+        "airfoil": candidate.foil.to_dict(),
+        "airfoil_coordinates": (
+            _airfoil_preview_coordinates_from_dat(foil_dat_override)
+            if foil_dat_override
+            else _airfoil_preview_coordinates(candidate.foil, coordinate_points)
+        ),
+        "airfoil_dat": (
+            foil_dat_override
+            if foil_dat_override
+            else airfoil_dat(candidate.foil, total_points=coordinate_points)
+        ),
+        "performance": {
+            "speed_m_s": float(condition["speed_m_s"]),
+            "reynolds": float(condition["reynolds"]),
+            "mach": float(condition["mach"]),
+            "target_cl": target_cl,
+            "alpha_deg": float(point["alpha_deg"]),
+            "cl": float(point["cl"]),
+            "cd": cd,
+            "ld": float(target_cl / max(cd, 1.0e-12)),
+        },
+        "polar": _finite_polar_preview(
+            candidate.response, float(condition["speed_m_s"])
+        ),
+    }
+
+
+def _wing_candidate_preview(
+    candidate: WingCandidate,
+    *,
+    foil: AirfoilLike,
+    foil_dat_text: str,
+    reference_speed_m_s: float,
+    evaluations: int,
+    stage: str,
+) -> dict[str, Any] | None:
+    if (
+        not math.isfinite(candidate.score)
+        or not candidate.response
+        or not candidate.conditions
+    ):
+        return None
+    condition = min(
+        candidate.conditions,
+        key=lambda item: abs(float(item["speed_m_s"]) - reference_speed_m_s),
+    )
+    point = condition["point"]
+    geometry = candidate.geometry.to_dict()
+    geometry["alpha_deg"] = float(point["alpha_deg"])
+    cd_total = float(point["cd"])
+    cd_profile = float(point.get("cdv", 0.0))
+    cd_induced = float(point.get("cdi", max(cd_total - cd_profile, 0.0)))
+    distribution: list[dict[str, float]] = []
+    for station in point.get("distribution", []):
+        row: dict[str, float] = {}
+        for key in ("y_m", "chord_m", "local_cl", "lift_n_per_m"):
+            try:
+                value = float(station[key])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if math.isfinite(value):
+                row[key] = value
+        if "y_m" in row and "lift_n_per_m" in row:
+            distribution.append(row)
+    return {
+        "stage": stage,
+        "evaluations": int(evaluations),
+        "objective": float(candidate.score),
+        "feasible": bool(wing_constraint_violation(candidate) <= 1.0e-12),
+        "airfoil": foil.to_dict(),
+        "airfoil_coordinates": _airfoil_preview_coordinates_from_dat(foil_dat_text),
+        "airfoil_dat": foil_dat_text,
+        "wing": {
+            "geometry": geometry,
+            "cl": float(condition["target_cl"]),
+            "cd_profile": cd_profile,
+            "cd_induced": cd_induced,
+            "cd_total": cd_total,
+            "lift_n": float(condition["lift_n"]),
+            "drag_n": float(condition["drag_n"]),
+            "ld": float(condition["ld"]),
+            "root_bending_moment_nm": float(
+                point.get("root_bending_moment_nm", 0.0)
+            ),
+            "stall_ratio": float(condition["stall_ratio"]),
+            "distribution": distribution,
+        },
+    }
 
 
 def interpolate_at_cl(points: list[dict[str, Any]], target_cl: float) -> dict[str, Any] | None:
@@ -786,6 +1009,7 @@ def optimize_airfoil_with_flow5(
     budget_escalation_settings: BudgetEscalationSettings = BudgetEscalationSettings(),
     checkpoint_store: OptimizerCheckpointStore | None = None,
     checkpoint_key: str = "",
+    reference_speed_m_s: float | None = None,
 ) -> tuple[CSTAirfoilDesign, dict[str, Any], dict[str, Any], str]:
     """Optimize around a real DAT baseline using flow5 embedded XFoil only."""
     budget = max(8, int(candidate_budget))
@@ -797,6 +1021,11 @@ def optimize_airfoil_with_flow5(
     detected = os.cpu_count() or 1
     outer_workers = max(1, min(budget, detected, int(total_threads) // threads_per_runner))
     family_prefix = f"Flow5-CST{cst_order}"
+    preview_reference_speed = float(
+        reference_speed_m_s
+        if reference_speed_m_s is not None
+        else speeds_m_s[len(speeds_m_s) // 2]
+    )
 
     def random_naca_seed(index: int) -> CSTAirfoilDesign:
         naca = AirfoilDesign(
@@ -876,12 +1105,53 @@ def optimize_airfoil_with_flow5(
     def evaluate_search(foil: CSTAirfoilDesign) -> FoilCandidate:
         return analyze(foil, alpha_step_search_deg)
 
+    def emit_foil_progress(
+        stage: str, current: int, total: int, message: str
+    ) -> None:
+        valid_candidates = [
+            item
+            for item in candidates
+            if math.isfinite(item.score) and item.response and item.conditions
+        ]
+        best_candidate = (
+            min(valid_candidates, key=lambda item: item.score)
+            if valid_candidates
+            else None
+        )
+        preview = (
+            _foil_candidate_preview(
+                best_candidate,
+                reference_speed_m_s=preview_reference_speed,
+                coordinate_points=coordinate_points,
+                evaluations=current,
+                stage=stage,
+                foil_dat_override=(
+                    baseline_profile.solver_dat_text
+                    if (
+                        best_candidate.foil.upper_weights,
+                        best_candidate.foil.lower_weights,
+                    )
+                    == baseline_key
+                    else None
+                ),
+            )
+            if best_candidate is not None
+            else None
+        )
+        _emit_progress(
+            progress_callback,
+            stage,
+            current,
+            total,
+            message,
+            best_so_far={"foil": preview} if preview is not None else None,
+        )
+
     baseline_within_envelope = valid(baseline_foil)
     baseline_search = evaluate_search(baseline_foil)
     if baseline_within_envelope:
         candidates.append(baseline_search)
-    _emit_progress(
-        progress_callback,
+    emit_foil_progress(
         "foil_search",
         len(candidates),
         budget_controller.progress_total,
@@ -921,8 +1191,7 @@ def optimize_airfoil_with_flow5(
                 message = "Profil azami bütçeye ulaştı; sonuç bütçe-sınırlı işaretlendi"
             else:
                 message = "Sabit profil aday bütçesi tamamlandı"
-            _emit_progress(
-                progress_callback,
+            emit_foil_progress(
                 "foil_budget",
                 search_evaluations,
                 budget_controller.progress_total,
@@ -993,8 +1262,7 @@ def optimize_airfoil_with_flow5(
                     evaluations_restored=search_evaluations,
                     generation_restored=generation,
                 )
-                _emit_progress(
-                    progress_callback,
+                emit_foil_progress(
                     "foil_search",
                     search_evaluations,
                     budget_controller.progress_total,
@@ -1048,8 +1316,7 @@ def optimize_airfoil_with_flow5(
                 score_history.extend(float(item.score) for item in evaluated)
                 for item in evaluated:
                     advisor.record((*item.foil.upper_weights, *item.foil.lower_weights), item.score)
-                _emit_progress(
-                    progress_callback,
+                emit_foil_progress(
                     "foil_search",
                     search_evaluations,
                     budget_controller.progress_total,
@@ -1139,8 +1406,7 @@ def optimize_airfoil_with_flow5(
                     advisor.record(trial_vectors[start + local_index], trial.score)
                     if trial.score <= population[population_index].score:
                         population[population_index] = trial
-                _emit_progress(
-                    progress_callback,
+                emit_foil_progress(
                     "foil_search",
                     search_evaluations,
                     budget_controller.progress_total,
@@ -1203,8 +1469,7 @@ def optimize_airfoil_with_flow5(
             candidates.extend(evaluated)
             score_history.extend(float(item.score) for item in evaluated)
             search_evaluations += len(evaluated)
-            _emit_progress(
-                progress_callback,
+            emit_foil_progress(
                 "foil_search",
                 search_evaluations,
                 budget_controller.progress_total,
@@ -1240,8 +1505,7 @@ def optimize_airfoil_with_flow5(
         )
         fine = analyze(_rename_foil(search_item.foil, fine_name), alpha_step_final_deg)
         fine_results.append((fine, is_baseline, float(search_item.score), valid(search_item.foil)))
-        _emit_progress(
-            progress_callback,
+        emit_foil_progress(
             "foil_final",
             index + 1,
             len(fine_pool),
@@ -1327,6 +1591,11 @@ def optimize_airfoil_with_flow5(
         "outer_parallel_runners": outer_workers,
         "threads_per_runner": threads_per_runner,
         "total_threads_requested": int(total_threads),
+        "maximum_concurrent_flow5_threads": int(
+            outer_workers * threads_per_runner
+        ),
+        "nested_numeric_threads_per_runner": 1,
+        "cpu_budget_enforced": True,
         "detected_logical_cores": detected,
         "surrogate": surrogate_report,
         "checkpoint": checkpoint_report,
@@ -1768,6 +2037,35 @@ def optimize_wing_with_flow5(
         except Exception as exc:
             return WingCandidate(geometry, error=str(exc)[-300:])
 
+    def emit_wing_progress(
+        stage: str, current: int, total: int, message: str
+    ) -> None:
+        valid_candidates = [
+            item
+            for item in candidates
+            if math.isfinite(item.score) and item.response and item.conditions
+        ]
+        preview = (
+            _wing_candidate_preview(
+                min(valid_candidates, key=wing_candidate_selection_key),
+                foil=foil,
+                foil_dat_text=foil_dat_text,
+                reference_speed_m_s=reference_speed_m_s,
+                evaluations=current,
+                stage=stage,
+            )
+            if valid_candidates
+            else None
+        )
+        _emit_progress(
+            progress_callback,
+            stage,
+            current,
+            total,
+            message,
+            best_so_far={"wing": preview} if preview is not None else None,
+        )
+
     optimizer_key = optimizer.strip().lower()
     if optimizer_key not in {"nsga2", "differential_evolution", "adaptive_elite"}:
         raise ValueError(
@@ -1861,8 +2159,7 @@ def optimize_wing_with_flow5(
                 message = "Kanat azami bütçeye ulaştı; sonuç bütçe-sınırlı işaretlendi"
             else:
                 message = "Sabit kanat aday bütçesi tamamlandı"
-            _emit_progress(
-                progress_callback,
+            emit_wing_progress(
                 "wing_budget",
                 search_evaluations,
                 budget_controller.progress_total,
@@ -1960,8 +2257,7 @@ def optimize_wing_with_flow5(
                     evaluations_restored=search_evaluations,
                     generation_restored=generation,
                 )
-                _emit_progress(
-                    progress_callback,
+                emit_wing_progress(
                     "wing_search",
                     search_evaluations,
                     budget_controller.progress_total,
@@ -2009,8 +2305,7 @@ def optimize_wing_with_flow5(
                 record_candidate(candidate)
                 if optimizer_key == "differential_evolution":
                     advisor.record(vector, candidate.score)
-                _emit_progress(
-                    progress_callback,
+                emit_wing_progress(
                     "wing_search",
                     search_evaluations,
                     budget_controller.progress_total,
@@ -2072,8 +2367,7 @@ def optimize_wing_with_flow5(
                     advisor.record(trial_vector, trial.score)
                     if trial.score <= population[target_index].score:
                         population[target_index] = trial
-                    _emit_progress(
-                        progress_callback,
+                    emit_wing_progress(
                         "wing_search",
                         search_evaluations,
                         budget_controller.progress_total,
@@ -2174,8 +2468,7 @@ def optimize_wing_with_flow5(
                     )
                     offspring.append(candidate)
                     record_candidate(candidate)
-                    _emit_progress(
-                        progress_callback,
+                    emit_wing_progress(
                         "wing_search",
                         search_evaluations,
                         budget_controller.progress_total,
@@ -2245,8 +2538,7 @@ def optimize_wing_with_flow5(
                     search_mesh,
                 )
             )
-            _emit_progress(
-                progress_callback,
+            emit_wing_progress(
                 "wing_search",
                 search_evaluations,
                 budget_controller.progress_total,
@@ -2263,13 +2555,15 @@ def optimize_wing_with_flow5(
         finalists,
         objective_keys,
         optimizer=optimizer_key,
+        reference_speed_m_s=reference_speed_m_s,
     )
     selected_for_final = [valid_search[index] for index in selected_indices]
     if optimizer_key == "nsga2":
         nsga2_report["finalist_selection"] = (
             "lowest hard-constraint violation, then scalar compromise + "
             "crowding-diverse Pareto representatives; scalar-only winner is "
-            "always retained as a diagnostic"
+            "always retained as a diagnostic; the highest feasible reference-speed "
+            "L/D candidate is retained as a separate diagnostic"
         )
     final_candidates: list[WingCandidate] = []
     for index, item in enumerate(selected_for_final):
@@ -2277,8 +2571,7 @@ def optimize_wing_with_flow5(
         final_candidates.append(
             evaluate(item.geometry, final_method, alpha_step_final_deg, False, final_mesh)
         )
-        _emit_progress(
-            progress_callback,
+        emit_wing_progress(
             "wing_final",
             index + 1,
             len(selected_for_final),
@@ -2290,6 +2583,18 @@ def optimize_wing_with_flow5(
         raise RuntimeError(f"flow5 son panel doğrulamasında geçerli kanat bulunamadı: {errors}")
     coarse_optimum = min(valid_final, key=wing_candidate_selection_key)
     scalar_coarse_optimum = min(valid_final, key=lambda item: item.score)
+    feasible_ld_finalists = [
+        item for item in valid_final if wing_constraint_violation(item) <= 1.0e-12
+    ]
+    highest_ld_pool = feasible_ld_finalists or valid_final
+    highest_ld_coarse_optimum = max(
+        highest_ld_pool,
+        key=lambda item: (
+            wing_reference_ld(item, reference_speed_m_s),
+            -wing_constraint_violation(item),
+            -float(item.score),
+        ),
+    )
 
     def candidate_is_valid(candidate: WingCandidate) -> bool:
         return bool(
@@ -2403,8 +2708,7 @@ def optimize_wing_with_flow5(
     optimum, convergence, output_mesh, output_fallback_used, output_error = (
         finalize_output_candidate(coarse_optimum)
     )
-    _emit_progress(
-        progress_callback,
+    emit_wing_progress(
         "mesh_convergence",
         1,
         2,
@@ -2444,8 +2748,7 @@ def optimize_wing_with_flow5(
         ) = finalize_output_candidate(
             scalar_coarse_optimum
         )
-        _emit_progress(
-            progress_callback,
+        emit_wing_progress(
             "scalar_only_final",
             1,
             1,
@@ -2461,6 +2764,60 @@ def optimize_wing_with_flow5(
             )
             scalar_optimum = None
             scalar_convergence = None
+
+    same_highest_ld_geometry = bool(
+        np.allclose(
+            vector_from_geometry(coarse_optimum.geometry),
+            vector_from_geometry(highest_ld_coarse_optimum.geometry),
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+    )
+    same_highest_ld_scalar_geometry = bool(
+        np.allclose(
+            vector_from_geometry(scalar_coarse_optimum.geometry),
+            vector_from_geometry(highest_ld_coarse_optimum.geometry),
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+    )
+    highest_ld_optimum: WingCandidate | None
+    highest_ld_convergence: dict[str, Any] | None
+    highest_ld_output_error: str | None = None
+    if same_highest_ld_geometry:
+        highest_ld_optimum = optimum
+        highest_ld_convergence = convergence
+    elif same_highest_ld_scalar_geometry and scalar_optimum is not None:
+        highest_ld_optimum = scalar_optimum
+        highest_ld_convergence = scalar_convergence
+    elif same_highest_ld_scalar_geometry:
+        highest_ld_optimum = None
+        highest_ld_convergence = None
+        highest_ld_output_error = scalar_output_error
+    else:
+        (
+            highest_ld_optimum,
+            highest_ld_convergence,
+            _,
+            highest_ld_fallback_used,
+            highest_ld_finalize_error,
+        ) = finalize_output_candidate(highest_ld_coarse_optimum)
+        emit_wing_progress(
+            "highest_ld_final",
+            1,
+            1,
+            (
+                "En yüksek L/D finalisti ince ağda çözülemedi; final ağ çıktısı korundu"
+                if highest_ld_fallback_used
+                else "En yüksek L/D finalisti yüksek çözünürlükte çözüldü"
+            ),
+        )
+        if highest_ld_optimum is None or highest_ld_convergence is None:
+            highest_ld_output_error = highest_ld_finalize_error or (
+                "En yüksek L/D finalisti son çıktı ağında çözülemedi"
+            )
+            highest_ld_optimum = None
+            highest_ld_convergence = None
 
     # The reference is deliberately equal-area; it is a comparison, not a search candidate.
     baseline_chord = float(optimum.geometry.area / optimum.geometry.span)
@@ -2481,8 +2838,7 @@ def optimize_wing_with_flow5(
         False,
         output_mesh,
     )
-    _emit_progress(
-        progress_callback,
+    emit_wing_progress(
         "mesh_convergence",
         2,
         2,
@@ -2572,6 +2928,55 @@ def optimize_wing_with_flow5(
         and scalar_convergence is not None
         and scalar_convergence.get("passed", False)
     )
+    highest_ld_result = (
+        as_result(highest_ld_optimum)
+        if highest_ld_optimum is not None
+        else None
+    )
+    highest_ld_violation = (
+        wing_constraint_violation(highest_ld_optimum)
+        if highest_ld_optimum is not None
+        else wing_constraint_violation(highest_ld_coarse_optimum)
+    )
+    highest_ld_feasible = bool(
+        highest_ld_optimum is not None
+        and highest_ld_violation <= 1.0e-12
+        and highest_ld_convergence is not None
+        and highest_ld_convergence.get("passed", False)
+    )
+    highest_ld_candidate = {
+        "definition": (
+            "Final ağda doğrulanan adaylar içinde referans hızdaki en yüksek flow5 L/D"
+        ),
+        "selection_basis": (
+            "maximum reference-speed L/D among feasible final-mesh flow5 finalists"
+            if feasible_ld_finalists
+            else "maximum reference-speed L/D among all final-mesh flow5 finalists; no feasible finalist was available"
+        ),
+        "reference_speed_m_s": float(reference_speed_m_s),
+        "available": highest_ld_result is not None,
+        "deliverable": highest_ld_result is not None,
+        "same_as_selected": bool(same_highest_ld_geometry),
+        "feasible": bool(highest_ld_feasible),
+        "constraint_feasible": bool(highest_ld_violation <= 1.0e-12),
+        "constraint_violation": float(highest_ld_violation),
+        "objective": float(
+            highest_ld_optimum.score
+            if highest_ld_optimum is not None
+            else highest_ld_coarse_optimum.score
+        ),
+        "mesh_convergence": highest_ld_convergence,
+        "wing": highest_ld_result,
+        "coarse_wing": (
+            None
+            if highest_ld_result is not None
+            else as_result(highest_ld_coarse_optimum)
+        ),
+        "error": highest_ld_output_error,
+        "search_candidate_added_outside_quota": bool(
+            finalist_selection["highest_ld_diagnostic_added"]
+        ),
+    }
     selection_comparison = {
         "definition": (
             "Aynı finalist havuzunda sert-kısıt önceliği ile yalnız skaler toplam "
@@ -2633,6 +3038,8 @@ def optimize_wing_with_flow5(
         "threads_inside_flow5": int(total_threads),
         "foil_coordinate_points": int(coordinate_points),
         "outer_parallel_runners": 1,
+        "nested_numeric_threads_per_runner": 1,
+        "cpu_budget_enforced": True,
         "oversubscription_prevented": True,
         "surrogate": surrogate_report,
         "multi_objective": nsga2_report,
@@ -2693,6 +3100,7 @@ def optimize_wing_with_flow5(
         or {"enabled": False, "performed": False, "passed": True},
         "pareto_analysis": pareto_analysis,
         "selection_comparison": selection_comparison,
+        "highest_ld_candidate": highest_ld_candidate,
         "solver": optimum.response.get("solver", {}) if optimum.response else {},
         "top_search_candidates": [
             {
@@ -2707,5 +3115,9 @@ def optimize_wing_with_flow5(
     if scalar_optimum is not None and not same_scalar_geometry:
         output_response["_scalar_only_alternative_response"] = dict(
             scalar_optimum.response or {}
+        )
+    if highest_ld_optimum is not None and not same_highest_ld_geometry:
+        output_response["_highest_ld_candidate_response"] = dict(
+            highest_ld_optimum.response or {}
         )
     return optimum_result, baseline_result, metadata, output_response
