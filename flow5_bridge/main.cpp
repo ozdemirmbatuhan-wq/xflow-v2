@@ -384,6 +384,19 @@ static std::vector<double> alphaList(double minimum, double maximum, double step
         values.push_back(std::min(value, maximum));
     }
     if (values.empty() || values.back() < maximum - 1e-9) values.push_back(maximum);
+    // Delivered wings carry their design incidence in the section geometry.
+    // Always solve the residual alpha=0 operating point when the requested
+    // range straddles it, even if a shifted regular grid would skip zero.
+    if (minimum <= 0.0 && maximum >= 0.0) values.push_back(0.0);
+    std::sort(values.begin(), values.end());
+    values.erase(
+        std::unique(
+            values.begin(),
+            values.end(),
+            [](double left, double right) { return std::abs(left - right) <= 1e-9; }
+        ),
+        values.end()
+    );
     return values;
 }
 
