@@ -80,6 +80,14 @@ class StaticUiContractTests(unittest.TestCase):
         self.assertIn("En yüksek L/D · STEP", javascript)
         self.assertIn("highest-ld/", html)
 
+    def test_delivered_geometry_zero_aoa_contract_is_visible(self):
+        javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("installed_geometry_validation", javascript)
+        self.assertIn("Montaj açısı", javascript)
+        self.assertIn("Dosyada 0° taşıma", javascript)
+        self.assertIn("teslim geometrisi AoA 0°", javascript)
+        self.assertIn("installedIncidence + twistAt", javascript)
+
     def test_winglet_controls_are_serialized_and_comparison_is_rendered(self):
         javascript = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         for field in (

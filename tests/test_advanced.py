@@ -79,6 +79,18 @@ class AdvancedAnalysisTests(unittest.TestCase):
         self.assertTrue(
             all(section.findtext("x_number_of_panels") == "12" for section in sections)
         )
+        exported_twists = [float(section.findtext("Twist")) for section in sections]
+        self.assertAlmostEqual(exported_twists[0], self.geometry.alpha_deg, places=8)
+        self.assertAlmostEqual(
+            exported_twists[1] - exported_twists[0],
+            self.geometry.effective_mid_twist_deg,
+            places=8,
+        )
+        self.assertAlmostEqual(
+            exported_twists[2] - exported_twists[0],
+            self.geometry.tip_twist_deg,
+            places=8,
+        )
 
     def test_winglet_geometry_preserves_projected_span_and_exports_four_sections(self):
         geometry = WingGeometry(
@@ -121,6 +133,18 @@ class AdvancedAnalysisTests(unittest.TestCase):
         self.assertEqual(
             [section.findtext("Right_Side_FoilName") for section in sections[-2:]],
             ["NACA0012", "NACA0012"],
+        )
+        exported_twists = [float(section.findtext("Twist")) for section in sections]
+        self.assertAlmostEqual(exported_twists[0], geometry.alpha_deg, places=8)
+        self.assertAlmostEqual(
+            exported_twists[2] - exported_twists[0],
+            geometry.tip_twist_deg,
+            places=8,
+        )
+        self.assertAlmostEqual(
+            exported_twists[3] - exported_twists[2],
+            geometry.winglet_toe_deg,
+            places=8,
         )
         main_tip_y = float(sections[2].findtext("y_position"))
         winglet_tip_y = float(sections[3].findtext("y_position"))

@@ -114,6 +114,44 @@ class Flow5NativePipelineTests(unittest.TestCase):
 
     def test_real_project_payload_is_required_and_packaged(self):
         exports = self.result["exports"]
+        installed = self.result["wing"]["installed_geometry_validation"]
+        self.assertTrue(installed["passed"])
+        self.assertEqual(installed["verification_alpha_deg"], 0.0)
+        self.assertAlmostEqual(
+            installed["verified_lift_n"],
+            self.result["flow"]["target_lift_n"],
+            delta=installed["tolerance_n"],
+        )
+        self.assertAlmostEqual(
+            self.result["wing"]["geometry"]["alpha_deg"],
+            installed["installed_incidence_deg"],
+            places=12,
+        )
+        reference_condition = min(
+            self.result["wing"]["conditions"],
+            key=lambda item: abs(
+                float(item["speed_m_s"]) - self.result["flow"]["speed_m_s"]
+            ),
+        )
+        self.assertAlmostEqual(
+            reference_condition["point"]["alpha_deg"], 0.0, places=6
+        )
+        exported = ET.fromstring(
+            exports["plane_xml"].replace("<!DOCTYPE flow5>", "")
+        )
+        exported_twists = [
+            float(section.findtext("Twist"))
+            for section in exported.findall(".//Section")
+        ]
+        self.assertAlmostEqual(
+            exported_twists[0], installed["installed_incidence_deg"], places=7
+        )
+        self.assertAlmostEqual(
+            exported_twists[1] - exported_twists[0],
+            self.result["wing"]["geometry"]["effective_mid_twist_deg"],
+            places=6,
+        )
+        self.assertIn("export_validation,verified_lift", exports["results_csv"])
         self.assertEqual(
             base64.b64decode(exports["flow5_project_base64"]),
             b"FLOW5_TEST_DOUBLE_PROJECT\x00",
@@ -127,6 +165,11 @@ class Flow5NativePipelineTests(unittest.TestCase):
         self.assertTrue(highest_ld_exports["available"])
         self.assertTrue(highest_ld_exports["wing_obj"])
         self.assertTrue(highest_ld_exports["wing_step_base64"])
+        highest_ld_validation = self.result["highest_ld_comparison"]["wing"][
+            "installed_geometry_validation"
+        ]
+        self.assertTrue(highest_ld_validation["passed"])
+        self.assertEqual(highest_ld_validation["verification_alpha_deg"], 0.0)
         self.assertEqual(
             base64.b64decode(highest_ld_exports["flow5_project_base64"]),
             b"FLOW5_TEST_DOUBLE_PROJECT\x00",
@@ -652,6 +695,20 @@ class Flow5NativePipelineTests(unittest.TestCase):
         self.assertTrue(result["hydro_analysis"]["panel_map_available"])
         self.assertTrue(result["exports"]["flow5_project_base64"])
         self.assertTrue(result["exports"]["wing_step_base64"])
+        installed = result["wing"]["installed_geometry_validation"]
+        self.assertTrue(installed["passed"])
+        self.assertEqual(installed["verification_alpha_deg"], 0.0)
+        self.assertAlmostEqual(
+            installed["verified_lift_n"], 1500.0, delta=installed["tolerance_n"]
+        )
+        self.assertGreater(abs(installed["installed_incidence_deg"]), 0.5)
+        exported = ET.fromstring(
+            result["exports"]["plane_xml"].replace("<!DOCTYPE flow5>", "")
+        )
+        root_twist = float(exported.findtext(".//Section/Twist"))
+        self.assertAlmostEqual(
+            root_twist, installed["installed_incidence_deg"], places=7
+        )
         json.dumps(result, allow_nan=False)
 
     def test_finalist_panel_cavitation_map_is_exported_without_blocking_ld(self):

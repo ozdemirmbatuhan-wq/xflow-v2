@@ -22,7 +22,14 @@ def alphas(request: dict) -> list[float]:
     values = [minimum + index * step for index in range(count + 1)]
     if not values or values[-1] < maximum - 1e-8:
         values.append(maximum)
-    return values
+    if minimum <= 0.0 <= maximum:
+        values.append(0.0)
+    return sorted(
+        {
+            round(value, 12): value
+            for value in values
+        }.values()
+    )
 
 
 def foil_metrics(path: Path) -> tuple[float, float]:
@@ -127,8 +134,9 @@ def plane_geometry(path: Path) -> dict[str, float | bool]:
     mid_chord = float(sections[1].findtext("Chord"))
     main_half_span = float(sections[main_tip_index].findtext("y_position"))
     main_tip_offset = float(sections[main_tip_index].findtext("xOffset"))
-    twist = float(sections[main_tip_index].findtext("Twist"))
-    mid_twist = float(sections[1].findtext("Twist"))
+    installed_incidence = float(sections[0].findtext("Twist"))
+    twist = float(sections[main_tip_index].findtext("Twist")) - installed_incidence
+    mid_twist = float(sections[1].findtext("Twist")) - installed_incidence
     winglet_length = 0.0
     winglet_height = 0.0
     winglet_projection = 0.0
@@ -146,7 +154,11 @@ def plane_geometry(path: Path) -> dict[str, float | bool]:
         winglet_projection = winglet_length * math.cos(cant)
         winglet_tip_chord = float(sections[-1].findtext("Chord"))
         winglet_taper = winglet_tip_chord / max(main_tip_chord, 1.0e-12)
-        winglet_toe = float(sections[-1].findtext("Twist")) - twist
+        winglet_toe = (
+            float(sections[-1].findtext("Twist"))
+            - installed_incidence
+            - twist
+        )
     projected_half_span = main_half_span + winglet_projection
     span = 2.0 * projected_half_span
     taper = main_tip_chord / root_chord
@@ -176,6 +188,7 @@ def plane_geometry(path: Path) -> dict[str, float | bool]:
         "twist": twist,
         "mid_factor": mid_factor,
         "mid_twist": mid_twist,
+        "installed_incidence": installed_incidence,
         "area": main_area + winglet_projected_area,
         "winglet_enabled": winglet_enabled,
         "winglet_height": winglet_height,
@@ -349,6 +362,7 @@ def run_wing(request: dict) -> dict:
     taper = float(geometry["taper"])
     sweep = float(geometry["sweep"])
     twist = float(geometry["twist"])
+    installed_incidence = float(geometry["installed_incidence"])
     mid_factor = float(geometry["mid_factor"])
     mid_twist = float(geometry["mid_twist"])
     tip_chord = root_chord * taper
@@ -392,7 +406,9 @@ def run_wing(request: dict) -> dict:
         q = 0.5 * density * speed**2
         points = []
         for alpha in alphas(request):
-            cl = 0.145 * (alpha + 0.7 + 0.11 * twist)
+            cl = 0.145 * (
+                alpha + installed_incidence + 0.7 + 0.11 * twist
+            )
             cdi = cl * cl / (math.pi * aspect_ratio * efficiency * induced_relief**2)
             cdv = (
                 0.0080
