@@ -57,7 +57,15 @@ def flow5_plane_xml(
     half_span_panels: int = 18,
     section_foils: Sequence[AirfoilLike] | None = None,
 ) -> str:
-    """Create a flow5 plane XML with an optional high-dihedral winglet strip."""
+    """Create a flow5 plane XML in the delivered, zero-AoA design attitude.
+
+    ``WingGeometry.alpha_deg`` is the incidence selected at the reference
+    operating point.  The optimizer solves an ordinary polar to find it, but a
+    downloaded geometry must carry that incidence itself; otherwise opening the
+    XML and analysing it at zero degrees describes a different operating point.
+    Relative mid/tip twist is therefore preserved while the selected incidence
+    is added to every section.
+    """
     if not 4 <= int(chordwise_panels) <= 200:
         raise ValueError("Kord yönündeki panel sayısı 4 ile 200 arasında olmalı")
     if not 4 <= int(half_span_panels) <= 400:
@@ -102,13 +110,21 @@ def flow5_plane_xml(
         )
         winglet_foil = foils[3] if len(foils) == 4 else foils[2]
         section_data = (
-            (0.0, wing.root_chord, 0.0, 0.0, 0.0, strip_panels[0], foils[0].name),
+            (
+                0.0,
+                wing.root_chord,
+                0.0,
+                0.0,
+                wing.alpha_deg,
+                strip_panels[0],
+                foils[0].name,
+            ),
             (
                 wing.main_semispan * wing.mid_span_fraction,
                 wing.mid_chord,
                 wing.mid_le_offset,
                 0.0,
-                wing.effective_mid_twist_deg,
+                wing.alpha_deg + wing.effective_mid_twist_deg,
                 strip_panels[1],
                 foils[1].name,
             ),
@@ -117,7 +133,7 @@ def flow5_plane_xml(
                 wing.winglet_root_chord,
                 wing.tip_le_offset,
                 wing.winglet_cant_deg,
-                wing.tip_twist_deg,
+                wing.alpha_deg + wing.tip_twist_deg,
                 strip_panels[2],
                 winglet_foil.name,
             ),
@@ -126,7 +142,7 @@ def flow5_plane_xml(
                 wing.winglet_tip_chord,
                 wing.winglet_tip_le_offset,
                 0.0,
-                wing.winglet_tip_twist_deg,
+                wing.alpha_deg + wing.winglet_tip_twist_deg,
                 0,
                 winglet_foil.name,
             ),
@@ -140,13 +156,21 @@ def flow5_plane_xml(
             int(half_span_panels),
         )
         section_data = (
-            (0.0, wing.root_chord, 0.0, 0.0, 0.0, strip_panels[0], foils[0].name),
+            (
+                0.0,
+                wing.root_chord,
+                0.0,
+                0.0,
+                wing.alpha_deg,
+                strip_panels[0],
+                foils[0].name,
+            ),
             (
                 wing.main_semispan * wing.mid_span_fraction,
                 wing.mid_chord,
                 wing.mid_le_offset,
                 0.0,
-                wing.effective_mid_twist_deg,
+                wing.alpha_deg + wing.effective_mid_twist_deg,
                 strip_panels[1],
                 foils[1].name,
             ),
@@ -155,7 +179,7 @@ def flow5_plane_xml(
                 wing.tip_chord,
                 wing.tip_le_offset,
                 0.0,
-                wing.tip_twist_deg,
+                wing.alpha_deg + wing.tip_twist_deg,
                 0,
                 foils[2].name,
             ),
@@ -305,7 +329,13 @@ def flow5_native_results_csv(foil: AirfoilLike, result: dict) -> str:
             "deg",
             "geometry",
         ),
-        ("wing", "incidence", geometry["alpha_deg"], "deg", "flow5"),
+        (
+            "wing",
+            "installed_incidence",
+            geometry["alpha_deg"],
+            "deg",
+            "flow5 design point; baked into exported geometry",
+        ),
         ("wing", "area", geometry["area"], "m2", "geometry"),
         ("wing", "aspect_ratio", geometry["aspect_ratio"], "-", "geometry"),
         ("performance", "CL", result["cl"], "-", "flow5"),
@@ -359,6 +389,47 @@ def flow5_native_results_csv(foil: AirfoilLike, result: dict) -> str:
                 ("hydro", "free_surface_risk", hydro.get("free_surface_risk", ""), "-", "Froude/depth screen"),
             ]
         )
+    installed = result.get("installed_geometry_validation", {})
+    if installed:
+        rows.extend(
+            [
+                (
+                    "export_validation",
+                    "analysis_alpha",
+                    installed.get("verification_alpha_deg", 0.0),
+                    "deg",
+                    "flow5 re-solve of delivered geometry",
+                ),
+                (
+                    "export_validation",
+                    "target_lift",
+                    installed.get("target_lift_n", result.get("lift_n", "")),
+                    "N",
+                    "requested reference operating point",
+                ),
+                (
+                    "export_validation",
+                    "verified_lift",
+                    installed.get("verified_lift_n", ""),
+                    "N",
+                    "flow5 re-solve of delivered geometry at zero AoA",
+                ),
+                (
+                    "export_validation",
+                    "lift_error",
+                    installed.get("lift_error_percent", ""),
+                    "%",
+                    "absolute target-lift error",
+                ),
+                (
+                    "export_validation",
+                    "passed",
+                    installed.get("passed", False),
+                    "-",
+                    "zero-AoA delivered-geometry gate",
+                ),
+            ]
+        )
     writer.writerows(rows)
     return output.getvalue()
 
@@ -397,7 +468,7 @@ def _wing_station_points(
     if kind == "main":
         chord = wing.chord_at(fraction)
         x_offset = wing.le_offset_at(fraction)
-        twist = radians(wing.twist_at(fraction))
+        twist = radians(wing.alpha_deg + wing.twist_at(fraction))
         y_center = side * fraction * wing.main_semispan
         z_center = 0.0
         normal_y = 0.0
@@ -421,7 +492,11 @@ def _wing_station_points(
         x_offset = wing.tip_le_offset + fraction * (
             wing.winglet_tip_le_offset - wing.tip_le_offset
         )
-        twist = radians(wing.tip_twist_deg + fraction * wing.winglet_toe_deg)
+        twist = radians(
+            wing.alpha_deg
+            + wing.tip_twist_deg
+            + fraction * wing.winglet_toe_deg
+        )
         y_center = side * (wing.main_semispan + distance * cos(cant))
         z_center = distance * sin(cant)
         normal_y = -side * sin(cant)
@@ -604,12 +679,14 @@ def flow5_bundle_bytes(
     """Package the exact foil, 3D wing, plane definition and analysis data together."""
     output = io.BytesIO()
     solved_line = (
-        "7. aeropt-optimized.fl5 gerçek flow5 analiz projesidir; flow5 içinde doğrudan açın."
+        "7. aeropt-optimized.fl5 gerçek flow5 analiz projesidir; montaj incidence'ı "
+        "geometriye işlenmiştir ve hedef nokta global AoA=0°'dir."
         if flow5_project_bytes
         else "7. Bu pakette çözülmüş .fl5 yoktur; 3B analizi flow5 içinde başlatın."
     )
     step_line = (
-        "4. aeropt-wing.step, metre biriminde kapalı OpenCascade loft katısıdır."
+        "4. aeropt-wing.step, tasarım incidence'ı işlenmiş, metre biriminde kapalı "
+        "OpenCascade loft katısıdır; eksenlere göre mevcut duruşunda AoA=0° hedefi içindir."
         if wing_step_bytes
         else "4. Bu pakette STEP katısı yoktur."
     )
@@ -635,8 +712,8 @@ def flow5_bundle_bytes(
     guide = f"""AeroOpt flow5 aktarım paketi
 
 1. aeropt-airfoil.dat profilini içe aktarın.
-2. aeropt-wing.xml uçak/kanat tanımını içe aktarın.
-3. aeropt-wing.obj, flow5 7.57 içinde 3B geometri kontrolü için kullanılabilir.
+2. aeropt-wing.xml tasarım montaj incidence'ı bütün kesitlere eklenmiş kanat tanımıdır.
+3. aeropt-wing.obj aynı AoA=0° tasarım duruşunun 3B geometri kontrolüdür.
 {step_line}
 5. xfoil-polar.csv varsa polar kaynağını aeropt-project.json içindeki polar_source alanından kontrol edin.
 6. aeropt-analysis.xml son flow5 analiz ayarlarını içerir.
@@ -645,6 +722,8 @@ def flow5_bundle_bytes(
 {highest_ld_line}
 
 Kaynak etiketi flow5 olan sayılar AeroOpt korelasyonundan değil flow5 API çıktısından alınmıştır.
+Teslim edilen XML/OBJ/STEP/.fl5 geometrisi referans hızda global AoA=0° ile yeniden
+çözülmeden paket oluşturulmaz; gerçek değer ve hata aeropt-results.csv içindedir.
 """
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         archive.writestr("README-flow5.txt", guide)

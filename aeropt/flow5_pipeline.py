@@ -256,6 +256,21 @@ def _native_insights(
                 "text": "Yerel Cl, Reynolds, profil/indüklenmiş sürükleme, yakınsama ve yük dağılımı flow5 çalışma noktalarından aktarıldı.",
             }
         )
+    installed = wing.get("installed_geometry_validation", {})
+    if installed:
+        messages.append(
+            {
+                "level": "good" if installed.get("passed") else "bad",
+                "title": "Teslim geometrisi AoA=0 noktasında yeniden doğrulandı",
+                "text": (
+                    f"Seçilen {float(installed.get('installed_incidence_deg', 0.0)):.3f}° "
+                    "montaj açısı XML, OBJ, STEP ve .fl5 geometrisine işlendi; "
+                    f"referans hızda global AoA=0° çözümü "
+                    f"{float(installed.get('verified_lift_n', 0.0)):.2f} N taşıma verdi "
+                    f"(hedef hata %{float(installed.get('lift_error_percent', 0.0)):.3f})."
+                ),
+            }
+        )
     winglet = wing_meta.get("winglet_comparison", {})
     if winglet.get("enabled"):
         if winglet.get("performed"):
@@ -2309,6 +2324,9 @@ def run_flow5_native_design(
             "native_artifacts_available": bool(
                 highest_ld_project_bytes and highest_ld_step_bytes
             ),
+            "installed_geometry_validation": highest_ld_wing.get(
+                "installed_geometry_validation", {}
+            ),
             "export_error": highest_ld_export_error,
             "selected_wing": wing,
             "highest_ld_wing": highest_ld_wing,
@@ -2325,6 +2343,9 @@ def run_flow5_native_design(
             "uygun flow5 finalistini ana seçimin yanında ayrı tutar.\n"
             "aeropt-highest-ld-wing.step metre biriminde kapalı CAD katısıdır.\n"
             "aeropt-highest-ld-optimized.fl5 çözümlenmiş flow5 projesidir.\n"
+            "XML, OBJ, STEP ve FL5 aynı montaj incidence'ını taşır; hedef çalışma "
+            "noktası referans hızda global AoA=0 derecedir. Sıfır-açı flow5 "
+            "doğrulaması results.csv ve summary.json içinde verilir.\n"
             "aeropt-highest-ld-summary.json seçim kapsamını ve ana kanatla "
             "karşılaştırma verisini içerir.\n"
         )

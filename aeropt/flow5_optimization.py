@@ -4,7 +4,7 @@ import math
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable, Sequence
 
 import numpy as np
@@ -1961,6 +1961,198 @@ def optimize_wing_with_flow5(
             winglet_optimization_enabled,
         )
 
+    def analyze_geometry(
+        geometry: WingGeometry,
+        *,
+        method: str,
+        alpha_min_deg: float,
+        alpha_max_deg: float,
+        alpha_step_deg: float,
+        save_project: bool,
+        panel_telemetry: bool,
+        mesh: Flow5Mesh,
+    ) -> dict[str, Any]:
+        return runner.analyze_wing(
+            foil=foil,
+            geometry=geometry,
+            fluid=fluid,
+            speeds_m_s=speeds_m_s,
+            method=method,
+            alpha_min_deg=alpha_min_deg,
+            alpha_max_deg=alpha_max_deg,
+            alpha_step_deg=alpha_step_deg,
+            max_threads=total_threads,
+            coordinate_points=coordinate_points,
+            foil_dat_text=foil_dat_text,
+            ncrit=ncrit,
+            xtr_top=xtr_top,
+            xtr_bottom=xtr_bottom,
+            save_project=save_project,
+            panel_telemetry=panel_telemetry,
+            panel_telemetry_target_lift_n=(
+                target_lift_n if panel_telemetry else None
+            ),
+            mesh=mesh,
+            section_foils=section_foils,
+            section_foil_dat_texts=section_foil_dat_texts,
+        )
+
+    def residual_alpha_for_target_lift(
+        points: list[dict[str, Any]], target_lift: float
+    ) -> float | None:
+        usable = sorted(
+            (
+                point
+                for point in points
+                if math.isfinite(float(point.get("alpha_deg", math.nan)))
+                and math.isfinite(float(point.get("lift_n", math.nan)))
+            ),
+            key=lambda point: float(point["alpha_deg"]),
+        )
+        for left, right in zip(usable, usable[1:]):
+            lift0 = float(left["lift_n"])
+            lift1 = float(right["lift_n"])
+            if (target_lift - lift0) * (target_lift - lift1) > 0.0:
+                continue
+            if abs(lift1 - lift0) <= 1.0e-12:
+                continue
+            fraction = (target_lift - lift0) / (lift1 - lift0)
+            return float(
+                float(left["alpha_deg"])
+                + fraction
+                * (float(right["alpha_deg"]) - float(left["alpha_deg"]))
+            )
+        return None
+
+    def export_installed_geometry(
+        geometry: WingGeometry,
+        conditions: list[dict[str, Any]],
+        *,
+        method: str,
+        alpha_step: float,
+        mesh: Flow5Mesh,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Bake design incidence into geometry and verify it at residual AoA zero."""
+        reference_condition = min(
+            conditions,
+            key=lambda item: abs(float(item["speed_m_s"]) - reference_speed_m_s),
+        )
+        incidence = float(reference_condition["point"]["alpha_deg"])
+        tolerance_n = max(0.005 * abs(target_lift_n), 0.5)
+        export_response: dict[str, Any] | None = None
+        zero_point: dict[str, Any] | None = None
+        correction_history: list[float] = []
+
+        for iteration in range(1, 4):
+            _check_cancelled(cancel_event)
+            installed_geometry = replace(geometry, alpha_deg=incidence)
+            export_response = analyze_geometry(
+                installed_geometry,
+                method=method,
+                alpha_min_deg=min(alpha_bounds[0] - incidence, 0.0),
+                alpha_max_deg=max(alpha_bounds[1] - incidence, 0.0),
+                alpha_step_deg=alpha_step,
+                save_project=True,
+                panel_telemetry=False,
+                mesh=mesh,
+            )
+            reference_case = min(
+                export_response["cases"],
+                key=lambda item: abs(
+                    float(item["speed_m_s"]) - reference_speed_m_s
+                ),
+            )
+            points = reference_case["points"]
+            zero_point = min(
+                points, key=lambda point: abs(float(point["alpha_deg"]))
+            )
+            if abs(float(zero_point["alpha_deg"])) > 1.0e-8:
+                raise RuntimeError(
+                    "Teslim geometrisinin flow5 polarında AoA=0 çalışma noktası oluşmadı"
+                )
+            lift_error_n = float(zero_point["lift_n"]) - target_lift_n
+            if abs(lift_error_n) <= tolerance_n:
+                break
+            correction = residual_alpha_for_target_lift(points, target_lift_n)
+            if correction is None:
+                raise RuntimeError(
+                    "Teslim geometrisi için AoA=0 hedef taşıma kalibrasyonu polar aralığında değil"
+                )
+            correction_history.append(float(correction))
+            if abs(correction) <= 1.0e-7:
+                break
+            incidence = float(
+                np.clip(incidence + correction, alpha_bounds[0], alpha_bounds[1])
+            )
+
+        if export_response is None or zero_point is None:
+            raise RuntimeError("Teslim geometrisi flow5 doğrulaması çalışmadı")
+        verified_lift = float(zero_point["lift_n"])
+        lift_error_n = verified_lift - target_lift_n
+        lift_error_percent = float(
+            100.0 * abs(lift_error_n) / max(abs(target_lift_n), 1.0e-12)
+        )
+        passed = bool(abs(lift_error_n) <= tolerance_n)
+        if not passed:
+            raise RuntimeError(
+                "Teslim geometrisi AoA=0 doğrulamasında hedef taşımayı tutturamadı: "
+                f"hedef={target_lift_n:.6g} N, flow5={verified_lift:.6g} N, "
+                f"hata=%{lift_error_percent:.3f}"
+            )
+        artifacts = export_response.get("artifact_payloads", {})
+        if not artifacts.get("project_fl5") or not artifacts.get("wing_step"):
+            raise RuntimeError(
+                "AoA=0 doğrulanmış teslim geometrisi .fl5 ve STEP dosyalarını birlikte üretmedi"
+            )
+        installed_geometry = replace(geometry, alpha_deg=incidence)
+        shifted_bounds = (
+            min(alpha_bounds[0] - incidence, 0.0),
+            max(alpha_bounds[1] - incidence, 0.0),
+        )
+        _, installed_conditions, installed_condition_error = _wing_conditions(
+            export_response,
+            installed_geometry,
+            fluid,
+            target_lift_n,
+            shifted_bounds,
+        )
+        if installed_condition_error or not installed_conditions:
+            raise RuntimeError(
+                "Teslim geometrisinin kaydırılmış flow5 polarında hedef taşıma koşulları kurulamadı: "
+                + (installed_condition_error or "koşul listesi boş")
+            )
+        installed_reference_condition = min(
+            installed_conditions,
+            key=lambda item: abs(float(item["speed_m_s"]) - reference_speed_m_s),
+        )
+        export_response = dict(export_response)
+        export_response["installed_target_conditions"] = installed_conditions
+        validation = {
+            "mode": "design_incidence_baked_into_geometry",
+            "passed": True,
+            "reference_speed_m_s": float(reference_speed_m_s),
+            "installed_incidence_deg": float(incidence),
+            "verification_alpha_deg": 0.0,
+            "target_lift_n": float(target_lift_n),
+            "verified_lift_n": verified_lift,
+            "lift_error_n": float(lift_error_n),
+            "lift_error_percent": lift_error_percent,
+            "tolerance_n": float(tolerance_n),
+            "tolerance_percent": 0.5,
+            "calibration_iterations": int(iteration),
+            "incidence_corrections_deg": correction_history,
+            "reference_target_residual_alpha_deg": float(
+                installed_reference_condition["point"]["alpha_deg"]
+            ),
+            "artifact_polar_alpha_min_deg": float(
+                shifted_bounds[0]
+            ),
+            "artifact_polar_alpha_max_deg": float(
+                shifted_bounds[1]
+            ),
+        }
+        return export_response, validation
+
     def evaluate(
         geometry: WingGeometry,
         method: str,
@@ -1975,29 +2167,15 @@ def optimize_wing_with_flow5(
                 error="Winglet yatay izdüşümü ana yarı açıklık için yer bırakmıyor",
             )
         try:
-            response = runner.analyze_wing(
-                foil=foil,
-                geometry=geometry,
-                fluid=fluid,
-                speeds_m_s=speeds_m_s,
+            response = analyze_geometry(
+                geometry,
                 method=method,
                 alpha_min_deg=alpha_bounds[0],
                 alpha_max_deg=alpha_bounds[1],
                 alpha_step_deg=alpha_step,
-                max_threads=total_threads,
-                coordinate_points=coordinate_points,
-                foil_dat_text=foil_dat_text,
-                ncrit=ncrit,
-                xtr_top=xtr_top,
-                xtr_bottom=xtr_bottom,
-                save_project=save,
+                save_project=False,
                 panel_telemetry=bool(save and hydro_settings.enabled),
-                panel_telemetry_target_lift_n=(
-                    target_lift_n if save and hydro_settings.enabled else None
-                ),
                 mesh=mesh,
-                section_foils=section_foils,
-                section_foil_dat_texts=section_foil_dat_texts,
             )
             score, conditions, condition_error = _wing_conditions(
                 response,
@@ -2006,6 +2184,28 @@ def optimize_wing_with_flow5(
                 target_lift_n,
                 alpha_bounds,
             )
+            if save and condition_error is None and conditions:
+                installed_response, installed_validation = export_installed_geometry(
+                    geometry,
+                    conditions,
+                    method=method,
+                    alpha_step=alpha_step,
+                    mesh=mesh,
+                )
+                response = dict(response)
+                response["artifact_payloads"] = dict(
+                    installed_response.get("artifact_payloads", {})
+                )
+                response["installed_incidence_deg"] = float(
+                    installed_validation["installed_incidence_deg"]
+                )
+                response["installed_geometry_validation"] = installed_validation
+                response["installed_target_conditions"] = list(
+                    installed_response.get("installed_target_conditions", [])
+                )
+                response["artifact_geometry_mode"] = (
+                    "design_incidence_baked; verify at global AoA=0 deg"
+                )
             structural = analyze_structure(
                 geometry=geometry,
                 foil_thickness_ratio=foil.thickness,
@@ -2853,12 +3053,25 @@ def optimize_wing_with_flow5(
 
     def as_result(candidate: WingCandidate) -> dict[str, Any]:
         assert candidate.conditions
-        condition = min(
+        analysis_condition = min(
             candidate.conditions,
             key=lambda item: abs(float(item["speed_m_s"]) - reference_speed_m_s),
         )
+        response = candidate.response or {}
+        delivered_conditions = response.get("installed_target_conditions")
+        if not isinstance(delivered_conditions, list) or not delivered_conditions:
+            delivered_conditions = candidate.conditions
+        condition = min(
+            delivered_conditions,
+            key=lambda item: abs(float(item["speed_m_s"]) - reference_speed_m_s),
+        )
         point = condition["point"]
-        alpha = float(point["alpha_deg"])
+        alpha = float(
+            response.get(
+                "installed_incidence_deg",
+                analysis_condition["point"]["alpha_deg"],
+            )
+        )
         geometry = WingGeometry(
             candidate.geometry.span,
             candidate.geometry.root_chord,
@@ -2903,7 +3116,14 @@ def optimize_wing_with_flow5(
             "section_polar_source": "flow5 viscous on-the-fly / embedded XFoil",
             "distribution": point.get("distribution", []),
             "method": condition["method"],
-            "conditions": candidate.conditions,
+            "conditions": delivered_conditions,
+            "analysis_design_alpha_deg": float(
+                analysis_condition["point"]["alpha_deg"]
+            ),
+            "installed_geometry_validation": response.get(
+                "installed_geometry_validation",
+                {},
+            ),
             "structural": candidate.structural
             or {"enabled": False, "performed": False, "passed": True},
             "hydro": candidate.hydro
@@ -3049,7 +3269,7 @@ def optimize_wing_with_flow5(
             * (baseline_result["drag_n"] - optimum_result["drag_n"])
             / max(baseline_result["drag_n"], 1e-12)
         ),
-        "conditions": optimum.conditions,
+        "conditions": optimum_result["conditions"],
         "solver_telemetry": {
             "out_of_mesh_points": sum(
                 bool(item["point"].get("out_of_mesh", False))
