@@ -424,6 +424,7 @@ function renderFoil(result) {
 function renderPlanform(result) {
   const g = result.wing.geometry; const foil = result.airfoil_coordinates; const width = 520, height = 190;
   const half = g.span / 2; const root = g.root_chord; const mainHalf = Number(g.main_semispan ?? half);
+  const installedIncidence = Number(g.alpha_deg || 0);
   const winglet = Boolean(g.winglet_active && Number(g.winglet_height) > 0);
   const midChord = Number(g.mid_chord ?? .5*(g.root_chord+g.tip_chord));
   const midTwist = Number(g.effective_mid_twist_deg ?? .5*g.tip_twist_deg);
@@ -432,7 +433,7 @@ function renderPlanform(result) {
   const mainPoint = (side, eta, xc, zc) => {
     const chord = chordAt(eta);
     const xOffset = .25*root + eta*mainHalf*Math.tan(g.sweep_deg*Math.PI/180) - .25*chord;
-    const twist = twistAt(eta) * Math.PI / 180;
+    const twist = (installedIncidence + twistAt(eta)) * Math.PI / 180;
     const xq = (xc-.25)*chord, z = zc*chord;
     return [xOffset + .25*chord + xq*Math.cos(twist) + z*Math.sin(twist), side*eta*mainHalf, -xq*Math.sin(twist) + z*Math.cos(twist)];
   };
@@ -444,7 +445,7 @@ function renderPlanform(result) {
     const chord = rootChord + fraction*(tipChord-rootChord);
     const rootOffset = Number(g.tip_le_offset); const tipOffset = Number(g.winglet_tip_le_offset ?? rootOffset);
     const xOffset = rootOffset + fraction*(tipOffset-rootOffset);
-    const twist = (Number(g.tip_twist_deg) + fraction*Number(g.winglet_toe_deg || 0))*Math.PI/180;
+    const twist = (installedIncidence + Number(g.tip_twist_deg) + fraction*Number(g.winglet_toe_deg || 0))*Math.PI/180;
     const xq = (xc-.25)*chord, z = zc*chord;
     const xr = xq*Math.cos(twist) + z*Math.sin(twist);
     const normal = -xq*Math.sin(twist) + z*Math.cos(twist);
@@ -969,10 +970,10 @@ function configureExportPanel(foilOnly) {
   panel.querySelector("h3").textContent = foilOnly ? "Optimize profil dosyaları" : "Çözümlenmiş flow5 paketi";
   panel.querySelector("p").textContent = foilOnly
     ? "DAT, flow5/XFoil poları ve yeniden kullanılabilir proje girdisi dışa aktarılır."
-    : "ZIP; DAT, plane/analysis XML, OBJ, polarlar, sonuçlar ve gerçek çözümlenmiş .fl5 projesini birlikte taşır.";
+    : "ZIP; tasarım incidence'ı işlenmiş XML/OBJ/STEP geometrisini, AoA=0 doğrulamasını, polarları ve çözümlenmiş .fl5 projesini birlikte taşır.";
   panel.querySelector("ol").innerHTML = foilOnly
     ? "<li><b>Airfoil · DAT</b> dosyasını indirin veya doğrudan Yalnız kanat modunu seçin</li><li>Son optimize profil bu tarayıcıda otomatik saklanır</li><li>Kanat aşamasında profil değişmeden flow5/XFoil ile yeniden doğrulanır</li>"
-    : "<li><b>aeropt-optimized.fl5</b> dosyasını flow5 7.57'de açın</li><li>Foil ve 3B polarları Data ağacında inceleyin</li><li>DAT/XML/OBJ dosyalarını bağımsız geometri aktarımı için kullanın</li>";
+    : "<li><b>aeropt-optimized.fl5</b> dosyasını flow5 7.57'de açın</li><li>Teslim geometrisinin hedef taşıma noktası global <b>AoA=0°</b>'dir</li><li>XML/OBJ/STEP aynı montaj incidence'ını taşır; CSV'deki sıfır-açı doğrulamasını kontrol edin</li>";
 }
 
 function prepareCompletedResult() {
@@ -1125,14 +1126,16 @@ function renderResult(result) {
   setWingResultVisibility(true);
   configureExportPanel(false);
   lastResult = result; const wing = result.wing, g = wing.geometry, f = result.airfoil;
+  const installed = wing.installed_geometry_validation || {};
   $("resultTitle").textContent = f.name;
   const speedText = result.flow5_native ? `${fmt(result.flow.speed_min_m_s,1)}–${fmt(result.flow.speed_max_m_s,1)} m/s · ref ${fmt(result.flow.speed_m_s,1)}` : `${fmt(result.flow.speed_m_s,1)} m/s`;
-  $("resultSubtitle").textContent = `${result.flow.name} · ${speedText} · ${result.polar_source} · hedef ${fmt(result.flow.target_lift_n,1)} N`;
+  $("resultSubtitle").textContent = `${result.flow.name} · ${speedText} · ${result.polar_source} · hedef ${fmt(result.flow.target_lift_n,1)} N · teslim geometrisi AoA 0°`;
   $("feasibilityBadge").textContent = result.status === "feasible" ? "Fizibil" : "Kontrol gerekli";
   $("feasibilityBadge").classList.toggle("review", result.status !== "feasible");
   $("metricGrid").innerHTML = [
     metric("Gerçekleşen taşıma", fmt(wing.lift_n,1), "N"), metric("Toplam sürükleme",fmt(wing.drag_n,2),"N"),
-    metric("L / D",fmt(wing.ld,1),""), metric("İndüklenmiş pay",fmt(wing.induced_drag_fraction_percent ?? 100*wing.cd_induced/Math.max(wing.cd_total,1e-12),1),"%"), metric("Açıklık oranı",fmt(g.aspect_ratio,2),""), metric("Tasarım α",fmt(g.alpha_deg,2),"°")
+    metric("L / D",fmt(wing.ld,1),""), metric("İndüklenmiş pay",fmt(wing.induced_drag_fraction_percent ?? 100*wing.cd_induced/Math.max(wing.cd_total,1e-12),1),"%"), metric("Açıklık oranı",fmt(g.aspect_ratio,2),""), metric("Montaj açısı",fmt(g.alpha_deg,2),"°"),
+    installed.passed ? metric("Dosyada 0° taşıma",fmt(installed.verified_lift_n,1),"N") : ""
   ].join("");
   $("foilTag").textContent = `${f.family} · Re ${sci(result.airfoil_optimization.reynolds)}`;
   $("reTag").textContent = `${result.polar_source} · M ${fmt(result.flow.mach,3)}`;
@@ -1140,7 +1143,7 @@ function renderResult(result) {
     ? `${result.winglet_comparison.selection === "winglet" ? "WINGLET" : "PLANAR"} · ΔD %${fmt(result.winglet_comparison.delta_winglet_vs_planar?.drag_percent,1)}`
     : `%${fmt(result.wing_optimization.drag_reduction_vs_rectangular_percent,1)} sürükleme farkı`;
   renderFoil(result); renderPlanform(result);
-  svgLineChart($("polarChart"), result.polar, "alpha_deg", "cl", { referenceX: g.alpha_deg, label: "Taşıma katsayısı polar grafiği" });
+  svgLineChart($("polarChart"), result.polar, "alpha_deg", "cl", { referenceX: result.airfoil_optimization?.final_cruise_point?.alpha_deg, label: "Taşıma katsayısı polar grafiği" });
   svgLineChart($("loadChart"), wing.distribution, "y_m", "lift_n_per_m", { yDigits: 1, xDigits: 2, label: "Kanat açıklığı boyunca yük dağılımı", emptyText: "Span dağılımı JSON köprüsünde yok; gerçek dağılım çözümlenmiş .fl5 projesindedir." });
   renderComparison(result);
   renderXfoil(result);
